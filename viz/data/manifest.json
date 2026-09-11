@@ -1,0 +1,21 @@
+{
+  "suites": [
+    "banking",
+    "slack",
+    "travel",
+    "workspace"
+  ],
+  "generated_at": "2026-09-11T16:25:50",
+  "embedding_backend": "lsa",
+  "case_count": 192,
+  "params": {
+    "input": "data/traces.json",
+    "outdir": "viz/data",
+    "flag_weight": 0.5,
+    "tau": null,
+    "residual_mode": "all",
+    "model": "BAAI/bge-small-en-v1.5",
+    "seed": 42,
+    "n_clusters": 6
+  }
+}

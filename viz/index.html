@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DojoScope · Trace Behavior Atlas</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"
+        integrity="sha512-vc58qvvBdrDR4etbxMdlTt4GBQk1qjvyORR2nrsPsFPyrs+/u5c3+1Ct6upOgdZoIl7eq6k3a1UPDSNAQi/32A=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<link rel="stylesheet" href="style.css?v=20260915" />
+</head>
+<body>
+
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-text">
+        <h1>DojoScope</h1>
+        <span>Trace Behavior Atlas</span>
+      </div>
+    </div>
+
+    <nav class="suite-tabs" id="suiteTabs"></nav>
+
+    <div class="topbar-actions">
+      <button id="overviewBtn" class="ghost-btn active">전체 보기</button>
+    </div>
+  </header>
+
+  <div class="symbol-guide" title="전역 고정 인코딩">
+    <span class="sg-item"><span class="sg-dot" style="background:#0066CC"></span>파랑 = 방어됨</span>
+    <span class="sg-item"><span class="sg-dot" style="background:#E30613"></span>빨강 = 침해됨</span>
+    <span class="sg-sep">│</span>
+    <span class="sg-item"><span class="sg-glyph">○</span>과제 성공</span>
+    <span class="sg-item"><span class="sg-glyph">X</span>과제 실패</span>
+  </div>
+
+  <div class="control-strip">
+    <div class="control-group">
+      <label>전체보기 공간</label>
+      <div class="segmented" id="spaceToggle">
+        <button data-value="residual" class="active">잔차 (residual)</button>
+        <button data-value="raw">원본 (raw)</button>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <label>조건 필터</label>
+      <div class="segmented" id="conditionFilter">
+        <button data-value="all" class="active">전체</button>
+        <button data-value="A">무방어</button>
+        <button data-value="B">방어(tool_filter)</button>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <label>색상 기준</label>
+      <select id="colorBy">
+        <option value="cluster" selected>계층적 군집</option>
+        <option value="security">방어 결과</option>
+      </select>
+    </div>
+
+    <div class="control-group">
+      <label>크기 기준</label>
+      <select id="sizeBy">
+        <option value="residual_length" selected>잔차 길이</option>
+        <option value="n_events">전체 이벤트 수</option>
+        <option value="none">고정</option>
+      </select>
+    </div>
+
+    <div class="control-group">
+      <label>모양 기준</label>
+      <select id="shapeBy">
+        <option value="utility" selected>과제 성공/실패 (O/X)</option>
+        <option value="condition">조건 (●무방어 / ■방어)</option>
+        <option value="none">고정</option>
+      </select>
+    </div>
+
+    <div class="control-group toggle-group cluster-controls">
+      <label class="checkbox">
+        <input type="checkbox" id="hullToggle" />
+        <span>2D 이웃 표시</span>
+      </label>
+      <label class="slider-label" title="UMAP 2D 이웃 연결 민감도 (값이 클수록 넓게 결합)">
+        민감도
+        <input type="range" id="hullSensitivity" min="1.2" max="4" step="0.1" value="2.5" disabled />
+      </label>
+      <label class="slider-label" title="2D 이웃 최소 구성 항목 수 (미만 시 윤곽 미표시)">
+        최소 크기
+        <input type="range" id="hullMinSize" min="2" max="8" step="1" value="3" disabled />
+      </label>
+    </div>
+
+    <div class="control-group toggle-group">
+      <label class="checkbox">
+        <input type="checkbox" id="compareToggle" />
+        <span>비교 선택 모드</span>
+      </label>
+    </div>
+
+    <div class="control-group search-group">
+      <input id="searchBox" type="text" placeholder="case_id / user_task 검색…" />
+    </div>
+  </div>
+
+  <main class="workspace">
+    <section class="plot-area" id="plotArea">
+      <!-- overview(2x2) 또는 focus(raw+residual 2패널)가 여기 렌더링됨 -->
+    </section>
+
+    <aside class="side-panel">
+      <div class="panel-block" id="compareBlock" hidden>
+        <h3>비교 선택 <span class="muted" id="compareCount"></span></h3>
+        <div id="compareContent" class="compare-content"></div>
+      </div>
+
+      <div class="panel-block" id="securityAnalysisBlock" hidden>
+        <h3>보안 결과</h3>
+        <div id="securityAnalysisContent" class="security-analysis-content"></div>
+      </div>
+
+      <div class="panel-block" id="legendBlock">
+        <h3>범례</h3>
+        <div id="legendContent" class="legend-content"></div>
+      </div>
+
+      <div class="panel-block" id="priorityBlock" hidden>
+        <h3>우선 검토 케이스</h3>
+        <div id="priorityContent"></div>
+      </div>
+
+      <div class="panel-block" id="clusterListBlock" hidden>
+        <h3>시각적 이웃</h3>
+        <div id="clusterListContent" class="cluster-list-content"></div>
+      </div>
+
+      <div class="panel-block" id="brushBlock">
+        <h3>그룹 분석 <span class="muted" id="brushCount"></span></h3>
+        <div id="brushContent" class="brush-content">
+          <p class="empty-hint">선택된 항목 없음</p>
+        </div>
+      </div>
+
+      <div class="panel-block" id="clusterValidationBlock">
+        <h3>군집 검증 <span class="muted">(ARI)</span></h3>
+        <div id="clusterValidationContent" class="validation-content"></div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="detail-drawer" id="detailDrawer">
+    <div class="drawer-handle" id="drawerHandle">
+      <span id="drawerTitle">케이스 상세</span>
+      <button id="drawerClose">닫기 ✕</button>
+    </div>
+    <div class="drawer-body" id="drawerBody"></div>
+  </footer>
+
+  <div class="loading-overlay" id="loadingOverlay" hidden>
+    <div class="loading-card">
+      <div class="spinner"></div>
+      <p id="loadingText">데이터 로드 중…</p>
+    </div>
+  </div>
+
+</div>
+
+<script src="app.js?v=20260916"></script>
+</body>
+</html>
