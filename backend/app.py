@@ -61,6 +61,43 @@ def get_manifest():
     return store.get_manifest()
 
 
+# UMAP/군집 결과가 "환경마다 다르게 나온다"는 문제를 반복해서 겪은 뒤 만든
+# 진단 엔드포인트 — requirements.txt에 고정해둔 버전(EXPECTED_VERSIONS, 이
+# 프로젝트가 실제로 검증한 유일한 조합)과 지금 이 프로세스에 실제로 깔려서
+# 도는 버전을 나란히 보여줘서, "서버가 공식 파이프라인을 쓰고 있는지"를
+# 추측하지 않고 바로 확인할 수 있게 한다.
+EXPECTED_VERSIONS = {
+    "python": "3.14",
+    "numpy": "2.4.4",
+    "scipy": "1.18.1",
+    "scikit-learn": "1.9.0",
+    "umap-learn": "0.5.12",
+}
+
+
+@app.get("/api/pipeline-version")
+def pipeline_version():
+    import numpy
+    import scipy
+    import sklearn
+    import umap
+
+    actual = {
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "numpy": numpy.__version__,
+        "scipy": scipy.__version__,
+        "scikit-learn": sklearn.__version__,
+        "umap-learn": umap.__version__,
+    }
+    mismatches = {k: {"expected": v, "actual": actual[k]} for k, v in EXPECTED_VERSIONS.items() if v != actual[k]}
+    return {
+        "expected": EXPECTED_VERSIONS,
+        "actual": actual,
+        "matches_canonical_pipeline": not mismatches,
+        "mismatches": mismatches,
+    }
+
+
 @app.get("/api/suite/{name}")
 def get_suite(name: str):
     data = store.get_suite(name)
