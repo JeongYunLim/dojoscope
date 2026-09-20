@@ -22,6 +22,13 @@ from .gt_align import DEFAULT_TAU, calibrate_tau
 from .security_analysis import build_security_analysis
 
 
+def _euclidean_matrix(coords: np.ndarray) -> np.ndarray:
+    """2D 좌표 배열 → 좌표간 유클리드 거리 행렬. 군집화/medoid 선정을 화면에
+    실제로 그려지는 좌표 공간과 동일한 기준으로 하기 위해 쓴다."""
+    diff = coords[:, None, :] - coords[None, :, :]
+    return np.sqrt((diff ** 2).sum(axis=-1))
+
+
 def _event_to_dict(ev, matched: bool, gt_index) -> dict:
     return {
         "index": ev.index,
@@ -69,20 +76,42 @@ def build_suite_output(
     raw_knn, raw_isolation_pct, raw_knn_k = knn_isolation(dist.raw_matrix, k=5)
     res_knn, res_isolation_pct, res_knn_k = knn_isolation(dist.residual_matrix, k=5)
 
-    # 계층적 군집화(cluster.py) — raw/residual 거리행렬 각각에 독립적으로 적용.
-    # UMAP 좌표(coords_raw/residual)는 시각화용 차원축소일 뿐 군집을 나눠주지
-    # 않으므로, "라벨 없이 거리만 보고 그룹을 나누는" 이 단계가 따로 필요하다.
-    # n_clusters를 명시하지 않으면(기본) 예전처럼 6으로 고정하지 않고, 라벨을 전혀
-    # 쓰지 않는 실루엣 기준 k-스윕(pipeline_study의 최신 실험 반영, cluster.py의
-    # select_k_by_silhouette 참고)으로 raw/residual 공간마다 독립적으로 k를 고른다.
+    # 군집화를 원래 잔차 DTW 거리행렬이 아니라, 그 행렬을 투영한 2D UMAP
+    # 좌표의 유클리드 거리 위에서 한다 — 화면에 그려지는 지도(coords_raw/
+    # residual)와 "군집" 딱지가 항상 같은 공간을 가리키게 하기 위해서다.
+    # 이전엔 원래 거리행렬로 군집을 나누고 그 결과를 2D 지도 위에 색으로만
+    # 얹었는데, UMAP이 아무리 n_neighbors를 잘 골라도(§35) 전역 순위 상관이
+    # 1.0이 될 수는 없어서(정보 손실은 차원 축소의 근본적 한계), 한 군집의
+    # 멤버가 화면에서 두 덩어리로 흩어지는 경우가 실제로 있었다 — 사용자가
+    # "군집끼리 제대로 안 묶인다"고 반복해서 보고한 원인이다.
+    # 트레이드오프를 직접 측정했다: hijack_tool 대비 ARI가 원래 거리행렬
+    # 기준 군집화보다 이 방식이 항상 더 낫지는 않다(banking/slack은 원래
+    # 거리행렬 기준이 더 높고, workspace는 이 방식이 더 높고, travel은 비슷 —
+    # 둘 다 잡음 수준). 즉 "정확도"는 어느 쪽도 확실히 우월하지 않지만,
+    # "화면에 보이는 군집이 실제로 화면에서 뭉쳐 보인다"는 이 도구의 핵심
+    # 목적(시각 분석 도구)에는 2D 좌표 기준이 원칙적으로 맞다 — 군집이 화면
+    # 밖 어딘가의 안 보이는 고차원 공간에서만 뭉쳐 있다고 말해봐야 사용자는
+    # 검증할 수 없다.
+    coords_raw_dist = _euclidean_matrix(coords_raw)
+    coords_residual_dist = _euclidean_matrix(coords_residual)
+
+    # 몇 개로 나눌지(k)와 그 k개를 "어떻게" 나눌지는 서로 다른 질문이라 일부러
+    # 공간을 분리했다. k는 원래 고차원 잔차 DTW 거리행렬의 실루엣 스윕으로
+    # 고른다 — 2D 좌표 유클리드 거리로 실루엣을 스윕해 봤더니 UMAP 특유의
+    # "큰 덩어리 두 개 + 그 안의 연속적인 변주" 구조 때문에 k=2에서 실루엣이
+    # 압도적으로 높게 나와(모든 suite에서 예외 없이 k=2 선택), 사용자가 원한
+    # "군집 내부에 어떤 하위 패턴이 있는지" 분석에 필요한 세분화된 군집이 전부
+    # 사라지는 문제가 실제로 있었다. 반면 실제 멤버 배정(cluster_distance_matrix)은
+    # 여전히 2D 좌표 거리 위에서 해서(coords_raw_dist/coords_residual_dist),
+    # 그 k개 군집이 화면에서 흩어지지 않고 뭉쳐 보이는 것은 그대로 보장한다.
     if n_clusters is None:
         raw_k, raw_k_sweep = select_k_by_silhouette(dist.raw_matrix)
         res_k, res_k_sweep = select_k_by_silhouette(dist.residual_matrix)
     else:
         raw_k = res_k = min(n_clusters, len(traces)) if traces else 0
         raw_k_sweep = res_k_sweep = []
-    raw_cluster = cluster_distance_matrix(dist.raw_matrix, k=raw_k)
-    res_cluster = cluster_distance_matrix(dist.residual_matrix, k=res_k)
+    raw_cluster = cluster_distance_matrix(coords_raw_dist, k=raw_k)
+    res_cluster = cluster_distance_matrix(coords_residual_dist, k=res_k)
 
     vt_by_case = {vt.trace.case_id: vt for vt in vtraces}
 
@@ -133,10 +162,12 @@ def build_suite_output(
         cluster_validation["raw"][field] = cluster_agreement(raw_cluster.labels, ref)
         cluster_validation["residual"][field] = cluster_agreement(res_cluster.labels, ref)
 
+    # medoid도 군집을 나눈 것과 같은 공간(2D 좌표 거리)에서 골라야 "이 대표
+    # 사례가 화면에서도 그 군집 한가운데에 있다"는 게 성립한다.
     hijack_tools = [t.hijack_tool for t in traces]
     cluster_medoids = {
-        "raw": compute_medoids(dist.raw_matrix, dist.case_ids, raw_cluster.labels, hijack_tools),
-        "residual": compute_medoids(dist.residual_matrix, dist.case_ids, res_cluster.labels, hijack_tools),
+        "raw": compute_medoids(coords_raw_dist, dist.case_ids, raw_cluster.labels, hijack_tools),
+        "residual": compute_medoids(coords_residual_dist, dist.case_ids, res_cluster.labels, hijack_tools),
     }
 
     return {
@@ -156,8 +187,11 @@ def build_suite_output(
         "security_analysis": security_analysis,
         "arrows": arrows,
         # 케이스간 직접 DTW 거리 행렬 — "각 트레이스 간 거리를 눈으로 볼 수 없다"는
-        # 문제에 대한 답. dist.case_ids 순서와 1:1 대응하며, 화면에서는 계층적
-        # 군집화의 병합 순서(merge_log)로 행/열을 재정렬해 클러스터 히트맵으로 그린다.
+        # 문제에 대한 답. 셀 값(raw/residual)은 원래 잔차 DTW 거리 그대로다(왜곡
+        # 없음). 다만 행/열 정렬에 쓰는 merge_log는 위에서 2D 좌표 기준으로 다시
+        # 나눈 군집(raw_cluster/res_cluster)의 병합 순서라, 지도 위 군집·군집 선택
+        # 칩과 항상 같은 그룹을 가리킨다 — 거리값 자체는 정직하게 두고 "무엇을
+        # 기준으로 묶어서 보여줄지"만 지도와 통일한 것.
         "distance_matrix": {
             "case_order": dist.case_ids,
             "raw": dist.raw_matrix.round(4).tolist(),
