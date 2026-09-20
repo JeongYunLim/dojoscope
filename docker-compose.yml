@@ -1,0 +1,23 @@
+services:
+  backend:
+    image: ${DOJO_BACKEND_IMAGE:-dojoscope-backend:latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    volumes:
+      # 업로드된 trace(current_traces.json)를 컨테이너 재시작/재배포 후에도
+      # 유지하려고 호스트에 마운트한다. sample_traces.json 등 시드 데이터는
+      # 이미지 안에 들어 있으니 볼륨과 상관없이 항상 존재한다.
+      - ./backend/data:/app/data
+    restart: unless-stopped
+
+  web:
+    image: ${DOJO_WEB_IMAGE:-dojoscope-web:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${HOST_WEB_PORT:-18240}:7680"
+    depends_on:
+      - backend
+    restart: unless-stopped

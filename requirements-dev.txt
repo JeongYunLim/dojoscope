@@ -1,5 +1,0 @@
-# 단위 테스트 실행에만 필요 (배포/실행 자체에는 불필요).
-#   pip install -r requirements.txt -r requirements-dev.txt
-#   pytest tests/ -v
-
-pytest>=7.4

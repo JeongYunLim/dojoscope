@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DojoScope</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pretendard@1.3.9/dist/web/static/pretendard.css" />
+<link rel="stylesheet" href="styles.css" />
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">
+    <span class="brand-name">dojoscope</span>
+  </div>
+  <nav id="suite-tabs"></nav>
+  <div class="topbar-actions">
+    <label class="upload-btn" title="AgentDojo trace JSON 업로드">
+      데이터 업로드
+      <input type="file" id="upload-input" accept="application/json" hidden />
+    </label>
+    <span id="status-dot" class="status-dot" title="서버 연결 상태"></span>
+  </div>
+</header>
+
+<div id="kpi-bar" class="kpi-bar hidden">
+  <div class="kpi-card" id="kpi-total"><span class="kpi-label">케이스 개수</span><span class="kpi-value">–</span></div>
+  <div class="kpi-card kpi-critical" id="kpi-critical"><span class="kpi-label">critical</span><span class="kpi-value">–</span></div>
+  <div class="kpi-card kpi-high" id="kpi-high"><span class="kpi-label">high</span><span class="kpi-value">–</span></div>
+  <div class="kpi-card kpi-medium" id="kpi-medium"><span class="kpi-label">medium</span><span class="kpi-value">–</span></div>
+  <div class="kpi-card kpi-low" id="kpi-low"><span class="kpi-label">low</span><span class="kpi-value">–</span></div>
+  <div class="kpi-card" id="kpi-defense-rate"><span class="kpi-label">B조건 방어 성공률</span><span class="kpi-value">–</span></div>
+</div>
+
+<div id="banner" class="hidden"></div>
+
+<div id="empty-state" class="empty-state hidden">
+  <div class="empty-card">
+    <h2 class="empty-title">아직 데이터가 없습니다</h2>
+    <p class="empty-desc">trace JSON을 업로드하면 계산되어 바로 화면에 반영됩니다.</p>
+    <div class="empty-actions">
+      <button id="empty-upload-btn" class="upload-btn upload-btn-lg">데이터 업로드</button>
+    </div>
+  </div>
+</div>
+
+<main id="layout">
+  <!-- (a) 속성 지도: residual UMAP / raw UMAP / 거리 행렬을 한 패널에서 탭으로 전환 -->
+  <section id="panel-map" class="map-panel">
+    <div class="panel-head">
+      <h2><span class="fig-label">a</span>속성 지도 <span class="panel-badge" id="badge-map">–</span></h2>
+      <div class="panel-actions">
+        <button class="ghost-btn" id="map-fit-view" title="확대/이동 초기화">화면 맞춤</button>
+        <button class="ghost-btn" id="map-svg-export" title="SVG로 내보내기">SVG</button>
+        <button class="ghost-btn icon-btn" id="map-settings-toggle" title="지도 설정">⚙</button>
+      </div>
+    </div>
+
+    <div class="map-toolbar">
+      <div class="tab-switch" id="map-tabs">
+        <button class="tab-btn active" data-tab="residual">residual</button>
+        <button class="tab-btn" data-tab="raw">raw</button>
+        <button class="tab-btn" data-tab="matrix">거리행렬</button>
+      </div>
+      <div class="chip-group" id="condition-filter">
+        <button class="chip active" data-cond="all">전체</button>
+        <button class="chip" data-cond="A">A</button>
+        <button class="chip" data-cond="B">B</button>
+      </div>
+    </div>
+
+    <div id="map-settings" class="map-settings hidden">
+      <div class="field-group-2col">
+        <label>점 크기 <input type="range" id="point-size" min="2" max="12" value="5" /></label>
+        <label id="cluster-k-row">군집 k=<span id="cluster-k-val">6</span> <input type="range" id="cluster-k" min="2" max="20" value="6" /></label>
+      </div>
+      <div class="checkbox-group">
+        <label class="checkbox-row"><input type="checkbox" id="toggle-outliers" /> 이상치만</label>
+        <label class="checkbox-row"><input type="checkbox" id="toggle-hull" checked /> 군집 윤곽</label>
+        <label>크기 기준
+          <select id="size-by">
+            <option value="residual_length">잔차 길이</option>
+            <option value="n_events">이벤트 수</option>
+            <option value="constant">균일</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div class="map-wrap" id="map-wrap-residual">
+      <svg id="svg-center"></svg>
+    </div>
+    <div class="map-wrap hidden" id="map-wrap-raw">
+      <svg id="svg-right"></svg>
+    </div>
+    <div class="map-wrap hidden" id="map-wrap-matrix">
+      <svg id="svg-matrix"></svg>
+    </div>
+  </section>
+
+  <!-- (b) TRACE VIEW -->
+  <section id="panel-trace">
+    <div class="panel-head">
+      <h2><span class="fig-label">b</span>TRACE VIEW</h2>
+      <div class="modal-nav">
+        <button id="nav-back" class="ghost-btn" title="이전">‹</button>
+        <span id="nav-pos" class="nav-pos">–</span>
+        <button id="nav-forward" class="ghost-btn" title="다음">›</button>
+      </div>
+    </div>
+    <div id="compare-pickers">
+      <div class="picker">
+        <span class="picker-label picker-a">A</span>
+        <input id="pick-a" placeholder="case_id 검색…" />
+        <div id="pick-a-results" class="search-results hidden"></div>
+      </div>
+      <button id="swap-btn" title="A/B 바꾸기">⇄</button>
+      <div class="picker">
+        <span class="picker-label picker-b">B</span>
+        <input id="pick-b" placeholder="case_id 검색…" />
+        <div id="pick-b-results" class="search-results hidden"></div>
+      </div>
+    </div>
+    <div id="trace-detail" class="trace-detail hidden">
+      <div class="trace-detail-head">
+        <div class="tab-switch" id="detail-tabs">
+          <button class="tab-btn active" data-which="a">A 원문</button>
+          <button class="tab-btn" data-which="b">B 원문</button>
+        </div>
+        <button id="pair-defense-btn" class="ghost-btn hidden">방어 전/후 짝</button>
+      </div>
+      <div id="trace-detail-body" class="trace-detail-body"></div>
+    </div>
+    <div id="trace-empty-hint" class="trace-empty-hint">지도·이벤트 로그에서 케이스 선택</div>
+  </section>
+
+  <!-- (c) 이벤트 로그 -->
+  <section id="event-log-section" class="event-log-section hidden">
+    <div class="panel-head">
+      <h2><span class="fig-label">c</span>이벤트 로그 <span class="panel-badge" id="badge-eventlog">–</span></h2>
+      <span class="event-log-count" id="event-log-count">–</span>
+    </div>
+    <div class="event-log-toolbar">
+      <div class="chip-group" id="event-log-severity-filter">
+        <button class="chip active" data-sev="all">전체</button>
+        <button class="chip" data-sev="critical">critical</button>
+        <button class="chip" data-sev="high">high</button>
+        <button class="chip" data-sev="medium">medium</button>
+        <button class="chip" data-sev="low">low</button>
+      </div>
+      <input id="event-log-search" placeholder="case_id 검색…" />
+    </div>
+    <div class="event-log-body">
+      <div class="event-log-table-wrap">
+        <table class="event-log-table">
+          <thead>
+            <tr><th></th><th>case_id</th><th>suite</th><th>조건</th><th>판정</th><th>납치 도구</th><th>잔차</th><th></th></tr>
+          </thead>
+          <tbody id="event-log-tbody"></tbody>
+        </table>
+      </div>
+      <div class="event-log-pager">
+        <button class="ghost-btn" id="event-log-prev">‹</button>
+        <span id="event-log-page-readout">–</span>
+        <button class="ghost-btn" id="event-log-next">›</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- (d) ANALYSIS VIEW -->
+  <section id="panel-analysis">
+    <div class="panel-head">
+      <h2><span class="fig-label">d</span>ANALYSIS VIEW</h2>
+      <div class="dtw-distance-box">
+        <div class="dtw-label">DTW(A,B)</div>
+        <div class="dtw-value" id="dtw-value">–</div>
+      </div>
+    </div>
+    <div id="compare-body" class="hidden">
+      <div class="scrub-row">
+        <input type="range" id="scrub" min="0" max="0" value="0" />
+        <span id="scrub-readout">0 / 0</span>
+        <button id="scrub-play">▶</button>
+      </div>
+      <div id="align-rows"></div>
+      <div id="diagnosis" class="diagnosis"></div>
+    </div>
+    <div id="analysis-empty-hint" class="trace-empty-hint">케이스 선택 →</div>
+    <div id="neighbor-evidence" class="neighbor-evidence hidden">
+      <div class="mini-chart-title">A 최근접 이웃 <span class="hint">(residual DTW)</span></div>
+      <div id="neighbor-bars"></div>
+    </div>
+    <details id="security-details" class="security-details">
+      <summary>보안 결과 집계 <span id="security-summary-line" class="security-summary-line"></span></summary>
+      <div id="security-body"></div>
+    </details>
+  </section>
+</main>
+
+<footer id="statusbar">
+  <span id="footer-msg">준비됨</span>
+  <span id="footer-conn" class="conn-ok">connected</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
