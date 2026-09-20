@@ -54,7 +54,8 @@ let pickedB = null;
 let compareResult = null;
 let scrubIndex = 0;
 let playTimer = null;
-let highlightSet = null;       // Set<case_id> | null — 브러시로 생긴 하이라이트
+let highlightSet = null;       // Set<case_id> | null — 브러시/군집 선택으로 생긴 하이라이트
+let selectedCluster = null;    // 군집 선택 칩에서 고른 군집 라벨(숫자) | null(전체)
 let showOutliersOnly = false;
 let mapTab = 'residual';       // 'residual' | 'raw' | 'matrix'
 let tooltipEl = null;
@@ -303,6 +304,7 @@ function renderAll() {
   renderTraceDetail();
   renderKpiBar(cases);
   renderEventLog(cases);
+  renderClusterPicker(cases);
 }
 
 // --------------------------------------------------------------- KPI bar
@@ -492,21 +494,117 @@ function sizeScaleFor(cases) {
 // 군집 윤곽은 점 색상(색상 기준 드롭다운)과 무관하게 항상 계층적 군집화
 // 결과(clusterK로 자른 덴드로그램)로 그린다 — 점 색은 과제 성공/실패 등 원하는
 // 속성 그대로 두고, 어떤 케이스들이 같은 군집인지는 윤곽선 색으로만 겹쳐 보여준다.
+// 계층적 군집화(average linkage)는 잔차 DTW 거리행렬 위에서 계산되고,
+// UMAP은 그 거리를 "국소 이웃"만 최대한 보존하며 2D로 눌러 담는 별개의
+// 투영이다 — 그래서 한 군집의 구성원이 2D에서 여러 덩어리로 흩어져
+// 떨어져 있을 수 있다. 이때 d3.polygonHull()로 볼록 껍질(convex hull)
+// 하나만 그리면, 그 군집과 무관한 사이 공간의 점들까지 껍질 안에 걸려서
+// "군집이 멀리 있는 걸 다 붙잡는" 것처럼 보인다(사용자가 실제로 겪은 문제,
+// UMAP 좌표로 직접 검증함 — 인접한 두 군집의 중심 거리가 군집 내부 평균
+// 반경과 비슷할 만큼 가까운 경우가 실제로 있었다).
+// 해결: 군집 전체에 하나의 볼록 껍질을 씌우는 대신, 화면 픽셀 거리 기준으로
+// "실제로 서로 붙어 있는" 부분집합(연결 요소)별로 각각 작은 볼록 껍질을
+// 그린다 — 비어 있는 공간을 건너뛰어 가짜로 다른 군집의 점을 감싸는 일이
+// 구조적으로 불가능해진다.
+function connectedComponents(points, threshold) {
+  const n = points.length;
+  const visited = new Array(n).fill(false);
+  const components = [];
+  for (let i = 0; i < n; i++) {
+    if (visited[i]) continue;
+    const stack = [i];
+    visited[i] = true;
+    const comp = [];
+    while (stack.length) {
+      const cur = stack.pop();
+      comp.push(cur);
+      for (let j = 0; j < n; j++) {
+        if (visited[j]) continue;
+        const dx = points[cur][0] - points[j][0], dy = points[cur][1] - points[j][1];
+        if (Math.sqrt(dx * dx + dy * dy) <= threshold) { visited[j] = true; stack.push(j); }
+      }
+    }
+    components.push(comp);
+  }
+  return components;
+}
+
 function drawHulls(g, cases, coordField, space, x, y) {
   const labelMap = getClusterLabelMap(space);
   const groups = d3.group(cases, (d) => labelMap.get(d.case_id));
   const hullColor = clusterHullColorScale(Array.from(labelMap.values()));
+
+  // "가깝다"의 기준 — 지금 화면(줌 레벨 포함)에 실제로 보이는 모든 점의
+  // 최근접 이웃 거리 중앙값의 2.5배. 점이 빽빽하면 문턱값도 자동으로
+  // 줄어들고, 흩어져 있으면 늘어난다(고정 픽셀값이 아니라 데이터에 맞춰
+  // 적응한다).
+  const allPts = cases.map((d) => [x(d[coordField][0]), y(d[coordField][1])]);
+  const nnDists = allPts.map((p, i) => {
+    let best = Infinity;
+    for (let j = 0; j < allPts.length; j++) {
+      if (i === j) continue;
+      const dx = p[0] - allPts[j][0], dy = p[1] - allPts[j][1];
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < best) best = dist;
+    }
+    return best;
+  }).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  const median = nnDists.length ? nnDists[Math.floor(nnDists.length / 2)] : 20;
+  const threshold = Math.max(median * 2.5, 12);
+
   groups.forEach((pts, key) => {
-    if (pts.length < 3) return;
     const points = pts.map((d) => [x(d[coordField][0]), y(d[coordField][1])]);
-    const hull = d3.polygonHull(points);
-    if (!hull) return;
-    g.append('path')
-      .attr('class', 'hull-outline')
-      .attr('pointer-events', 'none')
-      .attr('d', 'M' + hull.map((p) => p.join(',')).join('L') + 'Z')
-      .attr('fill', hullColor(String(key)))
-      .attr('stroke', hullColor(String(key)));
+    const components = connectedComponents(points, threshold);
+    components.forEach((comp) => {
+      if (comp.length < 3) return;
+      const hull = d3.polygonHull(comp.map((i) => points[i]));
+      if (!hull) return;
+      g.append('path')
+        .attr('class', 'hull-outline')
+        .attr('pointer-events', 'none')
+        .attr('d', 'M' + hull.map((p) => p.join(',')).join('L') + 'Z')
+        .attr('fill', hullColor(String(key)))
+        .attr('stroke', hullColor(String(key)));
+    });
+  });
+}
+
+// 군집별 선택 UI — 지도 위 윤곽선(색)과 같은 팔레트로 칩을 그려서 "이 칩 =
+// 저 색 군집"이 바로 매칭되게 하고, 클릭하면 그 군집만 남기고 나머지를
+// 흐리게 한다(기존 브러시 하이라이트 메커니즘 재사용, README §25 원칙대로
+// 점이 사라지지 않고 옅어지기만 함).
+function renderClusterPicker(cases) {
+  const box = document.getElementById('cluster-picker');
+  if (!suiteData || !suiteData.distance_matrix) { box.innerHTML = ''; return; }
+  const labelMap = getClusterLabelMap('residual');
+  const counts = new Map();
+  cases.forEach((d) => {
+    const lab = labelMap.get(d.case_id);
+    if (lab === undefined) return;
+    if (!counts.has(lab)) counts.set(lab, []);
+    counts.get(lab).push(d.case_id);
+  });
+  const labels = Array.from(counts.keys()).sort((a, b) => a - b);
+  const color = clusterHullColorScale(labels);
+
+  box.innerHTML = '';
+  const allBtn = document.createElement('button');
+  allBtn.className = 'chip cluster-chip' + (selectedCluster === null ? ' active' : '');
+  allBtn.textContent = '전체';
+  allBtn.onclick = () => { selectedCluster = null; clearHighlight(); renderClusterPicker(filteredCases()); };
+  box.appendChild(allBtn);
+
+  labels.forEach((lab) => {
+    const ids = counts.get(lab);
+    const btn = document.createElement('button');
+    btn.className = 'chip cluster-chip' + (selectedCluster === lab ? ' active' : '');
+    btn.innerHTML = `<span class="cluster-chip-swatch" style="background:${color(String(lab))}"></span>군집 ${lab} (${ids.length})`;
+    btn.onclick = () => {
+      if (selectedCluster === lab) { selectedCluster = null; clearHighlight(); }
+      else { selectedCluster = lab; setHighlight(new Set(ids)); }
+      renderClusterPicker(filteredCases());
+    };
+    box.appendChild(btn);
   });
 }
 
@@ -522,6 +620,7 @@ function setHighlight(ids) {
 }
 
 function clearHighlight() {
+  selectedCluster = null;
   setHighlight(null, null);
 }
 
@@ -529,6 +628,7 @@ function clearHighlight() {
 // 흐리게 만든다(하이라이트) — 설명 텍스트 패널 없이 지도 자체의 시각적
 // 피드백만으로 충분하다(사용자 요청: 지도 아래 설명 없이 UMAP만).
 function applyBrushSelection(ids) {
+  selectedCluster = null; // 브러시는 군집 선택과 다른 하이라이트 출처라 칩 활성 표시를 지운다
   if (!ids || !ids.size) { clearHighlight(); return; }
   setHighlight(ids, 'brush');
 }
@@ -963,6 +1063,7 @@ function wireControls() {
   document.getElementById('cluster-k').oninput = (e) => {
     clusterK = +e.target.value;
     document.getElementById('cluster-k-val').textContent = clusterK;
+    clearHighlight(); // k가 바뀌면 군집 번호 의미가 달라지므로 기존 선택은 무효
     renderAll();
   };
   document.getElementById('size-by').onchange = (e) => { filters.sizeBy = e.target.value; renderAll(); };

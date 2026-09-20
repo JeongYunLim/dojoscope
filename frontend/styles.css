@@ -161,6 +161,13 @@ h2 .fig-label {
 .chip-group { display: flex; gap: 3px; }
 .chip { border: 1px solid var(--border-strong); background: var(--panel); padding: 4px 9px; font-size: 11px; color: var(--text-dim); }
 .chip.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); font-weight: 600; }
+
+/* 군집별 선택 — 색은 지도 위 군집 윤곽선과 같은 팔레트를 그대로 재사용해서
+   "이 칩을 누르면 저 색 윤곽선 군집이 강조된다"는 매핑이 바로 보이게 했다. */
+.cluster-picker { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; flex: 0 0 auto; }
+.cluster-chip { display: inline-flex; align-items: center; gap: 5px; }
+.cluster-chip .cluster-chip-swatch { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.cluster-chip.active { font-weight: 600; }
 #color-by, #size-by {
   border: 1px solid var(--border-strong); background: var(--panel); font-size: 11px; padding: 4px 6px; font-family: inherit; color: var(--text);
 }
