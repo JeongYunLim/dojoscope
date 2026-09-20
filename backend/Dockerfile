@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.10-slim-bookworm
+# 로컬 개발 환경(Python 3.14)에서 확인한 것과 서버 UMAP/군집 결과가 완전히
+# 똑같이 나오도록, requirements.txt에 고정한 numpy 2.4.4 등이 실제로 설치되는
+# Python 버전(3.14)으로 맞췄다 — 3.10으로는 그 버전들의 wheel이 없다(직접 확인).
+FROM python:3.14-slim-bookworm
 
 WORKDIR /app
 
