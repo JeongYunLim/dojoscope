@@ -45,31 +45,56 @@ def project_2d(distance_matrix: np.ndarray, seed: int = 42) -> tuple[np.ndarray,
     iu = np.triu_indices(n, k=1)
     orig_flat = D[iu]
 
-    best_coords, best_nn, best_score = None, candidates[0], -2.0
+    # 후보 하나당 딱 한 번(seed 고정)만 돌려서 스피어만 상관계수로 비교했더니,
+    # 실제로 이 스코어가 UMAP의 확률적 SGD 최적화 노이즈에 크게 흔들린다는 게
+    # 실측으로 드러났다 — 같은 n_neighbors라도 seed만 바꾸면 점수가 후보들
+    # 사이의 점수 차이(수 %포인트)보다 더 크게(표준편차 2~8%포인트) 흔들려서,
+    # "제일 점수 높은 후보를 고른다"는 게 실은 진짜 신호가 아니라 그 한 번의
+    # 실행이 우연히 잘 나왔는지를 고르는 것과 다르지 않았다(travel suite에서
+    # 이 노이즈 때문에 평균적으로는 더 나쁜 n_neighbors=10이 뽑혀, banking(=40)
+    # 보다 지도 위 점들이 훨씬 더 흩어져 보이는 원인이 됐다 — suite마다 실제
+    # 거리행렬 통계는 큰 차이가 없었는데도 그랬다). 후보마다 서로 다른 고정
+    # seed 여러 개(REPEATS_PER_CANDIDATE개, seed, seed+1, seed+2)로 반복해
+    # 평균 점수로 비교하면 이 노이즈가 줄어든다 — seed 목록 자체는 고정값이라
+    # 재현성(n_jobs=1과 같은 목적)은 그대로 유지된다.
+    REPEATS_PER_CANDIDATE = 3
+
+    def _fit_and_score(n_neighbors: int, run_seed: int):
+        reducer = umap.UMAP(
+            n_components=2,
+            n_neighbors=n_neighbors,
+            metric="precomputed",
+            random_state=run_seed,
+            min_dist=0.1,
+            # random_state만 고정하고 n_jobs를 기본값(-1, 병렬)으로 두면 numba의
+            # 병렬 SGD 최적화 단계가 프로세스마다 다른 스레드 스케줄로 실행되어,
+            # 같은 거리행렬·같은 seed로도 "화면에 그려진 지도"가 실행할 때마다
+            # 달라지는 문제가 실제로 있었다 — 발표 슬라이드의 UMAP 이미지와 이
+            # 서버가 매번 새로 계산한 UMAP이 달라 보인 원인이 이것으로 확인됐다
+            # (같은 거리행렬을 n_jobs=1로 다시 투영하면 슬라이드가 참조한
+            # 좌표와 소수점까지 일치했다). n_jobs=1로 고정해 완전한 재현성을
+            # 보장한다.
+            n_jobs=1,
+        )
+        coords = reducer.fit_transform(D)
+        proj_flat = np.sqrt(((coords[iu[0]] - coords[iu[1]]) ** 2).sum(axis=1))
+        score, _ = spearmanr(orig_flat, proj_flat)
+        return coords, (score if score is not None and not np.isnan(score) else -2.0)
+
+    best_coords, best_nn, best_mean_score = None, candidates[0], -2.0
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=UserWarning)
         for n_neighbors in candidates:
-            reducer = umap.UMAP(
-                n_components=2,
-                n_neighbors=n_neighbors,
-                metric="precomputed",
-                random_state=seed,
-                min_dist=0.1,
-                # random_state만 고정하고 n_jobs를 기본값(-1, 병렬)으로 두면 numba의
-                # 병렬 SGD 최적화 단계가 프로세스마다 다른 스레드 스케줄로 실행되어,
-                # 같은 거리행렬·같은 seed로도 "화면에 그려진 지도"가 실행할 때마다
-                # 달라지는 문제가 실제로 있었다 — 발표 슬라이드의 UMAP 이미지와 이
-                # 서버가 매번 새로 계산한 UMAP이 달라 보인 원인이 이것으로 확인됐다
-                # (같은 거리행렬을 n_jobs=1로 다시 투영하면 슬라이드가 참조한
-                # 좌표와 소수점까지 일치했다). n_jobs=1로 고정해 완전한 재현성을
-                # 보장한다.
-                n_jobs=1,
-            )
-            coords = reducer.fit_transform(D)
-            proj_flat = np.sqrt(((coords[iu[0]] - coords[iu[1]]) ** 2).sum(axis=1))
-            score, _ = spearmanr(orig_flat, proj_flat)
-            if score is not None and not np.isnan(score) and score > best_score:
-                best_score, best_coords, best_nn = score, coords, n_neighbors
+            scores = []
+            base_coords = None
+            for rep in range(REPEATS_PER_CANDIDATE):
+                coords, score = _fit_and_score(n_neighbors, seed + rep)
+                scores.append(score)
+                if rep == 0:
+                    base_coords = coords  # 화면에 실제로 쓸 좌표는 기존과 같이 base seed 결과로 고정
+            mean_score = float(np.mean(scores))
+            if mean_score > best_mean_score:
+                best_mean_score, best_coords, best_nn = mean_score, base_coords, n_neighbors
     return best_coords, best_nn
 
 
