@@ -555,16 +555,42 @@ function drawHulls(g, cases, coordField, space, x, y) {
   groups.forEach((pts, key) => {
     const points = pts.map((d) => [x(d[coordField][0]), y(d[coordField][1])]);
     const components = connectedComponents(points, threshold);
+    const color = hullColor(String(key));
     components.forEach((comp) => {
-      if (comp.length < 3) return;
-      const hull = d3.polygonHull(comp.map((i) => points[i]));
-      if (!hull) return;
-      g.append('path')
-        .attr('class', 'hull-outline')
-        .attr('pointer-events', 'none')
-        .attr('d', 'M' + hull.map((p) => p.join(',')).join('L') + 'Z')
-        .attr('fill', hullColor(String(key)))
-        .attr('stroke', hullColor(String(key)));
+      if (comp.length >= 3) {
+        const hull = d3.polygonHull(comp.map((i) => points[i]));
+        if (hull) {
+          g.append('path')
+            .attr('class', 'hull-outline')
+            .attr('pointer-events', 'none')
+            .attr('d', 'M' + hull.map((p) => p.join(',')).join('L') + 'Z')
+            .attr('fill', color)
+            .attr('stroke', color);
+          return;
+        }
+      }
+      // 점 1~2개짜리 조각(또는 폴리곤이 만들어지지 않는 경우)은 다각형 윤곽을
+      // 그릴 수 없다고 그냥 건너뛰면, k를 올릴수록 흔해지는 작은 군집이
+      // 화면에서 통째로 사라져 "이 군집은 어디 있지?"에 답할 수 없게 된다
+      // (실측: k가 커질수록 average linkage 특성상 크기 1~2인 군집이 늘고,
+      // 그 멤버들이 서로 화면 문턱 거리보다 떨어져 있으면 윤곽이 하나도
+      // 안 그려짐). 점선 원(+2점이면 연결선)으로 최소한의 위치 표시를 남긴다.
+      const comp2 = comp.map((i) => points[i]);
+      if (comp2.length === 2) {
+        g.append('line')
+          .attr('class', 'hull-outline hull-outline-stub')
+          .attr('pointer-events', 'none')
+          .attr('x1', comp2[0][0]).attr('y1', comp2[0][1])
+          .attr('x2', comp2[1][0]).attr('y2', comp2[1][1])
+          .attr('stroke', color).attr('stroke-width', 2).attr('stroke-dasharray', '3,3');
+      }
+      comp2.forEach(([px, py]) => {
+        g.append('circle')
+          .attr('class', 'hull-outline hull-outline-stub')
+          .attr('pointer-events', 'none')
+          .attr('cx', px).attr('cy', py).attr('r', 9)
+          .attr('fill', 'none').attr('stroke', color).attr('stroke-width', 1.5).attr('stroke-dasharray', '2,2');
+      });
     });
   });
 }
