@@ -61,8 +61,8 @@ def build_suite_output(
 
     dist = compute_suite_distances(vtraces, gt_vectors_by_case, tau=resolved_tau, residual_mode=residual_mode)
 
-    coords_raw = project_2d(dist.raw_matrix, seed=seed)
-    coords_residual = project_2d(dist.residual_matrix, seed=seed)
+    coords_raw, n_neighbors_raw = project_2d(dist.raw_matrix, seed=seed)
+    coords_residual, n_neighbors_residual = project_2d(dist.residual_matrix, seed=seed)
 
     validation = validate_suite(traces, dist.raw_matrix, dist.residual_matrix)
 
@@ -144,7 +144,8 @@ def build_suite_output(
         "params": {"flag_weight": flag_weight, "tau": resolved_tau, "tau_auto_calibrated": tau_auto,
                    "residual_mode": residual_mode, "embedding_backend": embedder.backend, "seed": seed,
                    "n_clusters_raw": raw_k, "n_clusters_residual": res_k,
-                   "n_clusters_auto": n_clusters is None},
+                   "n_clusters_auto": n_clusters is None,
+                   "n_neighbors_raw": n_neighbors_raw, "n_neighbors_residual": n_neighbors_residual},
         "case_ids": dist.case_ids,
         "cases": cases,
         "validation": validation,
