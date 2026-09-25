@@ -18,7 +18,7 @@ from .reduce import project_2d
 from .schema import Trace
 from .validate import LABEL_FIELDS, validate_suite
 from .vectorize import Embedder, vectorize_ground_truth, vectorize_trace
-from .gt_align import DEFAULT_TAU, calibrate_tau
+from .gt_align import DEFAULT_TAU, calibrate_tau, build_argument_majority_reference, compute_arg_mismatch_details
 from .security_analysis import build_security_analysis
 
 
@@ -29,7 +29,8 @@ def _euclidean_matrix(coords: np.ndarray) -> np.ndarray:
     return np.sqrt((diff ** 2).sum(axis=-1))
 
 
-def _event_to_dict(ev, matched: bool, gt_index) -> dict:
+def _event_to_dict(ev, matched: bool, gt_index, arg_mismatch_detail: dict | None = None) -> dict:
+    detail = arg_mismatch_detail or {}
     return {
         "index": ev.index,
         "role": ev.role,
@@ -39,6 +40,8 @@ def _event_to_dict(ev, matched: bool, gt_index) -> dict:
         "injected": ev.injected,
         "matched_to_gt": matched,
         "gt_index": gt_index,
+        "arg_mismatch": bool(detail),
+        "arg_mismatch_detail": detail,
     }
 
 
@@ -115,10 +118,15 @@ def build_suite_output(
 
     vt_by_case = {vt.trace.case_id: vt for vt in vtraces}
 
+    # 인자잔차(참고 신호) — gt_align.build_argument_majority_reference의
+    # docstring 참고: 케이스별 클린런이 없어 suite 전체 다수결로 근사한다.
+    arg_majority_ref = build_argument_majority_reference(traces)
+
     cases = []
     for i, t in enumerate(traces):
         matched = dist.matched_to_gt[t.case_id]
         gt_idx = dist.gt_index_of_event[t.case_id]
+        arg_mismatch_details = compute_arg_mismatch_details(t, matched, arg_majority_ref)
         cases.append({
             "case_id": t.case_id,
             "pair_key": t.pair_key,
@@ -147,7 +155,8 @@ def build_suite_output(
             "injection_exposure": t.injection_exposure,
             "hijack_events": t.hijack_events,
             "first_deviation": t.first_deviation,
-            "events": [_event_to_dict(ev, matched[k], gt_idx[k]) for k, ev in enumerate(t.events)],
+            "n_arg_mismatch": sum(1 for d in arg_mismatch_details if d),
+            "events": [_event_to_dict(ev, matched[k], gt_idx[k], arg_mismatch_details[k]) for k, ev in enumerate(t.events)],
         })
 
     security_analysis = build_security_analysis(cases)

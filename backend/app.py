@@ -34,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from pipeline.dtw import dtw_distance
-from pipeline.gt_align import DEFAULT_TAU, align_to_ground_truth
+from pipeline.gt_align import DEFAULT_TAU, align_to_ground_truth, build_argument_majority_reference, compute_arg_mismatch
 from pipeline.vectorize import serialize_event, vectorize_ground_truth, vectorize_trace
 from store import store
 
@@ -155,7 +155,7 @@ def _summarize(trace) -> dict:
     }
 
 
-def _events_payload(trace) -> list[dict]:
+def _events_payload(trace, arg_mismatch: list[bool] | None = None) -> list[dict]:
     return [
         {
             "index": ev.index,
@@ -165,8 +165,9 @@ def _events_payload(trace) -> list[dict]:
             "text": ev.text,
             "injected": ev.injected,
             "sentence": serialize_event(ev),
+            "arg_mismatch": bool(arg_mismatch[i]) if arg_mismatch else False,
         }
-        for ev in trace.events
+        for i, ev in enumerate(trace.events)
     ]
 
 
@@ -191,27 +192,39 @@ def compare(req: CompareRequest):
     va = vectorize_trace(trace_a, embedder)
     vb = vectorize_trace(trace_b, embedder)
     ab = dtw_distance(va.vectors, vb.vectors)
+    # 정렬 경로를 따라간 로컬 코사인 거리 — dtw.py의 cost_matrix는 원래
+    # "디버깅/시각화용"이라고 적혀 있었는데 지금까지 어느 화면에도 노출된
+    # 적이 없었다. 스크러버가 "몇 번째로 짝지어졌다"만 보여주고 "그 짝이
+    # 실제로 얼마나 가까운/먼 짝인지"는 안 보여주고 있었던 것.
+    local_cost = [float(ab.cost_matrix[i, j]) for i, j in ab.path] if ab.cost_matrix.size else []
 
     def _gt_alignment(trace, vtrace):
         suite_out = store.get_suite(trace.suite)
         tau = suite_out["params"]["tau"] if suite_out else DEFAULT_TAU
         gt_vec = vectorize_ground_truth(trace.ground_truth, embedder)
         align = align_to_ground_truth(vtrace.vectors, gt_vec, tau=tau)
+        suite_traces = [t for t in store.traces if t.suite == trace.suite]
+        majority_ref = build_argument_majority_reference(suite_traces)
+        arg_mismatch = compute_arg_mismatch(trace, align.matched_to_gt, majority_ref)
         return {
             "tau": tau,
             "matched_to_gt": align.matched_to_gt,
             "gt_index_of_event": align.gt_index_of_event,
+            "arg_mismatch": arg_mismatch,
         }
 
+    gt_align_a = _gt_alignment(trace_a, va)
+    gt_align_b = _gt_alignment(trace_b, vb)
     return {
         "distance": ab.distance,
         "path": ab.path,
+        "local_cost": local_cost,
         "case_a": _summarize(trace_a),
         "case_b": _summarize(trace_b),
-        "events_a": _events_payload(trace_a),
-        "events_b": _events_payload(trace_b),
-        "gt_align_a": _gt_alignment(trace_a, va),
-        "gt_align_b": _gt_alignment(trace_b, vb),
+        "events_a": _events_payload(trace_a, gt_align_a["arg_mismatch"]),
+        "events_b": _events_payload(trace_b, gt_align_b["arg_mismatch"]),
+        "gt_align_a": gt_align_a,
+        "gt_align_b": gt_align_b,
     }
 
 
