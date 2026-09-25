@@ -51,6 +51,8 @@ let currentSuite = null;
 let filters = { condition: 'all', sizeBy: 'residual_length' };
 let pickedA = null;
 let pickedB = null;
+let argCompareTarget = null;  // {caseId, eventIndex} | null — 클린런 비교 화면(5번)에서 보고 있는 이벤트
+let traceViewTab = 'raw';     // 'raw' | 'compare' — 3번 패널 안의 원문/DTW비교 탭
 let compareResult = null;
 let scrubIndex = 0;
 let playTimer = null;
@@ -121,6 +123,20 @@ const CLUSTER_HULL_PALETTE = ['#168665', '#b85001', '#635f98', '#c42275', '#568d
 function clusterHullColorScale(labels) {
   const domain = Array.from(new Set(labels)).sort((a, b) => a - b).map(String);
   return d3.scaleOrdinal(CLUSTER_HULL_PALETTE).domain(domain);
+}
+
+// hijack_tool은 순수 범주형(명목, 암묵적 순서 없음, Ch10.2.3) 값이라 hue로
+// 인코딩한다. "None"(공격 없음)은 척도에 안 속하는 별도 상태라 중립 회색으로
+// 고정하고(SEVERITY_COLORS의 low와 같은 원칙), 나머지 도구 이름에만 채도
+// 높은 색을 순서 없이 배정한다. cluster hull(CLUSTER_HULL_PALETTE)·심각도
+// 색(SEVERITY_COLORS)과 겹치지 않는 세 번째 색상족을 쓴다 — 같은 화면에
+// 동시에 보이는 세 범주형 인코딩이 서로 간섭하지 않게 하기 위해서(6.9).
+const HIJACK_TOOL_PALETTE = ['#2f6fb3', '#c9622f', '#3f9142', '#a03a6b', '#8a6d1f', '#4a6fa5'];
+const HIJACK_NONE_COLOR = '#9aa1a8';
+function hijackToolColorScale(names) {
+  const domain = Array.from(new Set(names)).filter((n) => n !== 'None').sort();
+  const scale = d3.scaleOrdinal(HIJACK_TOOL_PALETTE).domain(domain);
+  return (name) => (name === 'None' ? HIJACK_NONE_COLOR : scale(name));
 }
 
 function setStatus(msg, ok) {
@@ -219,17 +235,22 @@ function caseTooltipHtml(d) {
     + `<br/>클릭: A/B 비교에 추가`;
 }
 
+function setOverviewStripExpanded(expanded) {
+  document.getElementById('overview-strip-detail').classList.toggle('collapsed', !expanded);
+  document.getElementById('overview-strip-toggle').textContent = expanded ? '접기 ▴' : '자세히 ▾';
+}
+
 // ------------------------------------------------------------------- init
 function showEmptyState() {
   document.getElementById('empty-state').classList.remove('hidden');
   document.getElementById('layout').style.display = 'none';
-  document.getElementById('kpi-bar').classList.add('hidden');
+  document.getElementById('overview-strip').classList.add('hidden');
   document.getElementById('event-log-section').classList.add('hidden');
 }
 function hideEmptyState() {
   document.getElementById('empty-state').classList.add('hidden');
   document.getElementById('layout').style.display = '';
-  document.getElementById('kpi-bar').classList.remove('hidden');
+  document.getElementById('overview-strip').classList.remove('hidden');
   document.getElementById('event-log-section').classList.remove('hidden');
 }
 
@@ -252,6 +273,15 @@ async function init() {
   renderSuiteTabs();
   await loadSuite(manifest.suites[0]);
 }
+
+// 창 크기가 바뀌어도(브라우저 리사이즈, OS 폰트 배율 변경 등) 지도 SVG가
+// 렌더링 시점에 재던 clientWidth/Height 그대로 방치되던 것을 고친다 —
+// 리사이즈 이벤트가 연달아 여러 번 오므로 마지막 것만 반영(debounce)한다.
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (suiteData) renderAll(); }, 150);
+});
 
 function renderSuiteTabs() {
   const nav = document.getElementById('suite-tabs');
@@ -279,8 +309,20 @@ async function loadSuite(name) {
   pickedA = null;
   pickedB = null;
   resetHistory();
-  renderSecurityOutcomes();
   renderAll();
+}
+
+// 어느 지도 탭을 실제로 보여줄지 정하고 래퍼 표시를 맞춘다. 보안 분석 탭은 넓은
+// 화면이 필요해서, 케이스를 골라 상세 화면(지도가 절반 폭)으로 넘어가면 residual
+// 지도로 되돌린다 — 보안 탭으로 돌아오면 상세를 닫은 뒤 다시 보인다.
+function applyMapTab() {
+  const eff = mapTab === 'security' && pickedA ? 'residual' : mapTab;
+  document.getElementById('map-wrap-residual').classList.toggle('hidden', eff !== 'residual');
+  document.getElementById('map-wrap-raw').classList.toggle('hidden', eff !== 'raw');
+  document.getElementById('map-wrap-matrix').classList.toggle('hidden', eff !== 'matrix');
+  document.getElementById('map-wrap-security').classList.toggle('hidden', eff !== 'security');
+  document.getElementById('panel-explore').classList.toggle('sec-mode', eff === 'security');
+  return eff;
 }
 
 function filteredCases() {
@@ -292,17 +334,35 @@ function filteredCases() {
 // ------------------------------------------------------------------ render
 function renderAll() {
   hideTooltip(); // 재렌더링으로 점이 다시 그려지기 전에, 열려 있던 호버 팝업을 먼저 닫는다
+
+  // 화면 전환(개요 ↔ 상세): pickedA 유무로 상태를 판정해서 #layout에
+  // .detail-mode를 토글한다 — 별도 상태 변수를 안 둬도 항상 실제 선택
+  // 상태와 일치한다. 그리드 영역이 바뀌면(그리드는 애니메이션 없이
+  // 즉시 전환) 아래에서 clientWidth를 다시 재는 순간 새 크기가 그대로
+  // 반영된다(브라우저가 레이아웃 속성을 읽을 때 강제로 리플로우함).
+  const layoutEl = document.getElementById('layout');
+  layoutEl.classList.toggle('detail-mode', !!pickedA);
+  layoutEl.classList.toggle('argcompare-mode', !!argCompareTarget);
+  renderArgSummary();
+  renderArgCompare();
+
   const cases = filteredCases();
-  document.getElementById('badge-map').textContent = mapTab === 'matrix' ? `${cases.length}×${cases.length}` : `${cases.length}건`;
+  const tab = applyMapTab();
+  document.getElementById('badge-map').textContent = tab === 'matrix' ? `${cases.length}×${cases.length}`
+    : tab === 'security' ? `${buildSecPairs().length}쌍` : `${cases.length}건`;
   // residual은 어떤 탭이 켜져 있든 항상 계산한다(9.3의 기본 근거 뷰).
   renderMap('svg-center', cases, 'coords_residual', true, 'residual_isolation_percentile');
-  if (mapTab === 'raw') {
+  if (tab === 'raw') {
     renderMap('svg-right', cases, 'coords_raw', false, 'raw_isolation_percentile');
-  } else if (mapTab === 'matrix') {
+  } else if (tab === 'matrix') {
     renderDistanceMatrix(cases);
+  } else if (tab === 'security') {
+    renderSecurityView();
   }
   renderTraceDetail();
   renderKpiBar(cases);
+  renderQuickStats(cases);
+  renderValidityBar(cases);
   renderEventLog(cases);
   renderClusterPicker(cases);
 }
@@ -326,6 +386,714 @@ function renderKpiBar(cases) {
   const condB = cases.filter((d) => d.condition === 'B');
   const defenseRate = condB.length ? (condB.filter((d) => !d.security).length / condB.length) * 100 : null;
   document.querySelector('#kpi-defense-rate .kpi-value').textContent = defenseRate === null ? 'n/a' : `${defenseRate.toFixed(0)}%`;
+}
+
+// ------------------------------------------------------------ quick stats
+// 지도 옆 작은 사이드 그래프 — 예전엔 "자세히"를 눌러야 보이는 큰 카드 4개
+// 였다. 전부 이미 서버가 계산해서 내려주는 필드(security_analysis,
+// hijack_tool, delay_bucket, exposure_channel)를 재사용한다. 각 막대를
+// 누르면 그 조건에 맞는 케이스만 지도에서 강조된다(cluster-picker와 같은
+// 하이라이트 메커니즘 재사용) — "눌러서 그 트레이스가 뭔지 보이게" 요청에
+// 대한 답.
+function renderQuickStats(cases) {
+  const box = document.getElementById('panel-quickstats');
+  if (!box || box.classList.contains('hidden') || !suiteData) return;
+  renderQsAsr(cases);
+  renderQsHijackTool(cases);
+  renderQsDelayBucket(cases);
+  renderQsExposure(cases);
+}
+
+function qsRow(el, { swatch, label, count, max, ids, title }) {
+  const row = document.createElement('div');
+  row.className = 'composition-row qs-row';
+  row.title = title || `${label}: ${count}건 — 클릭하면 지도에서 강조`;
+  row.innerHTML = `<span class="composition-swatch" style="background:${swatch}"></span>`
+    + `<span class="composition-label">${label}</span>`
+    + `<div class="composition-bar-track"><div class="composition-bar-fill" style="width:${(count / max) * 100}%;background:${swatch}"></div></div>`
+    + `<span class="composition-count">${count}</span>`;
+  row.onclick = () => {
+    selectedCluster = null;
+    setHighlight(new Set(ids));
+    renderClusterPicker(filteredCases());
+  };
+  el.appendChild(row);
+}
+
+// (1) ASR — targeted attack success rate, 조건별. 클릭하면 그 조건에서
+// 실제로 뚫린 케이스만 지도에서 강조된다.
+function renderQsAsr(cases) {
+  const el = document.getElementById('qs-asr');
+  el.innerHTML = '';
+  const colorByCond = { A: '#a8391f', B: '#2f6fb3' };
+  const byCond = { A: cases.filter((d) => d.condition === 'A'), B: cases.filter((d) => d.condition === 'B') };
+  const max = Math.max(byCond.A.length, byCond.B.length, 1);
+  ['A', 'B'].forEach((cond) => {
+    const group = byCond[cond];
+    if (!group.length) return;
+    const hijacked = group.filter((d) => d.security);
+    const pct = (hijacked.length / group.length) * 100;
+    qsRow(el, {
+      swatch: colorByCond[cond], label: `${cond === 'A' ? '무방어' : '방어'} (n=${group.length})`,
+      count: hijacked.length, max: group.length,
+      ids: hijacked.map((d) => d.case_id),
+      title: `${cond === 'A' ? '무방어' : '방어'}: ASR ${pct.toFixed(0)}% (${hijacked.length}/${group.length}) — 클릭하면 뚫린 케이스만 강조`,
+    });
+    el.lastChild.querySelector('.composition-count').textContent = `${pct.toFixed(0)}%`;
+  });
+}
+
+// (2) 납치된 도구 분포 — 범주형(hue) + 개수(길이).
+function renderQsHijackTool(cases) {
+  const el = document.getElementById('qs-hijack-tool');
+  el.innerHTML = '';
+  const hijacked = cases.filter((d) => d.hijack_tool);
+  if (!hijacked.length) { el.innerHTML = '<div class="ov-empty">납치된 케이스 없음</div>'; return; }
+  const groups = new Map();
+  hijacked.forEach((d) => {
+    if (!groups.has(d.hijack_tool)) groups.set(d.hijack_tool, []);
+    groups.get(d.hijack_tool).push(d.case_id);
+  });
+  const entries = Array.from(groups.entries()).sort((a, b) => b[1].length - a[1].length).slice(0, 5);
+  const color = hijackToolColorScale(entries.map((e) => e[0]));
+  const max = Math.max(...entries.map((e) => e[1].length), 1);
+  entries.forEach(([name, ids]) => qsRow(el, { swatch: color(name), label: name, count: ids.length, max, ids }));
+}
+
+// (3) 납치 시점 — 즉시(immediate) vs 지연(delayed) vs 안전(none). 위험도
+// 순으로 색 배정(즉시=빨강, 지연=주황, 없음=중립 회색).
+const DELAY_BUCKET_LABELS = { immediate: '즉시 납치', delayed: '지연 납치', none: '안전(뚫리지 않음)' };
+const DELAY_BUCKET_COLORS = { immediate: '#a8391f', delayed: '#c96a2e', none: '#9aa1a8' };
+const DELAY_BUCKET_ORDER = ['immediate', 'delayed', 'none'];
+function renderQsDelayBucket(cases) {
+  const el = document.getElementById('qs-delay-bucket');
+  el.innerHTML = '';
+  const groups = new Map();
+  cases.forEach((d) => {
+    if (!groups.has(d.delay_bucket)) groups.set(d.delay_bucket, []);
+    groups.get(d.delay_bucket).push(d.case_id);
+  });
+  const max = Math.max(...Array.from(groups.values()).map((v) => v.length), 1);
+  DELAY_BUCKET_ORDER.forEach((key) => {
+    const ids = groups.get(key) || [];
+    if (!ids.length) return;
+    qsRow(el, { swatch: DELAY_BUCKET_COLORS[key], label: DELAY_BUCKET_LABELS[key], count: ids.length, max, ids });
+  });
+}
+
+// (4) 주입 노출 경로 — 어떤 도구의 응답(tool_resp)에 공격 지시문이 가장 많이
+// 실려오는지. 방어 우선순위(입력 새니타이징을 어디부터 넣을지) 판단 근거.
+function renderQsExposure(cases) {
+  const el = document.getElementById('qs-exposure');
+  el.innerHTML = '';
+  const exposed = cases.filter((d) => d.exposure_channel);
+  if (!exposed.length) { el.innerHTML = '<div class="ov-empty">노출 케이스 없음</div>'; return; }
+  const groups = new Map();
+  exposed.forEach((d) => {
+    if (!groups.has(d.exposure_channel)) groups.set(d.exposure_channel, []);
+    groups.get(d.exposure_channel).push(d.case_id);
+  });
+  const entries = Array.from(groups.entries()).sort((a, b) => b[1].length - a[1].length).slice(0, 5);
+  const max = Math.max(...entries.map((e) => e[1].length), 1);
+  entries.forEach(([name, ids]) => qsRow(el, { swatch: 'var(--accent)', label: name, count: ids.length, max, ids }));
+}
+
+// ------------------------------------------------------ 보안 분석 탭
+// 보안 개발자가 지도를 열기 전에 먼저 묻는 질문에 답하는 화면:
+//  (1) 방어가 실제로 먹혔나, 아니면 공격이 원래 안 먹힌 건가?  -> 4분류
+//  (2) 막았더니 어디로 새나(다른 도구로 우회)?                  -> Sankey
+//  (3) 뚫린다면 노출 후 얼마나 빨리?                           -> 지연 분포 + 케이스별 타임라인
+//  (4) 케이스 단위로 방어 전/후가 어떻게 바뀌었나?              -> 기울기 그래프
+// 전부 이미 내려오는 cases 필드(pair_key, condition, security, utility, hijack_tool,
+// delay, injection_exposure, first_deviation, hijack_events)로 클라이언트에서 계산한다.
+// 주의: 이 데이터에는 tool_filter가 "시도했다가 차단"한 기록이 없다 — 그래서 "차단"은
+// "A에서는 납치가 있었는데 B에서는 납치 이벤트가 없음"으로만 정의된다(방어 효과와
+// 모델이 그냥 따르지 않은 경우를 구분하지 못한다).
+const SEC_QUAD = {
+  success: { label: '방어 성공', sub: 'A 뚫림 → B 안전', color: '#15803d' },
+  benign: { label: '공격이 원래 안 먹힘', sub: 'A 안전 → B 안전 (방어 효과 아님)', color: '#9aa1a8' },
+  fail: { label: '방어 실패', sub: 'A 뚫림 → B 뚫림', color: '#c81e1e' },
+  regress: { label: '방어로 퇴행', sub: 'A 안전 → B 뚫림', color: '#c96a2e' },
+};
+const SEC_QUAD_ORDER = ['success', 'benign', 'fail', 'regress'];
+const SEC_OUT = {
+  none: { label: 'B에서 납치 없음', color: '#15803d' },
+  other: { label: '다른 도구로 납치', color: '#c96a2e' },
+  same: { label: '같은 도구로 납치', color: '#c81e1e' },
+};
+const SEC_OUT_ORDER = ['none', 'other', 'same'];
+let secSel = { quad: null, flow: null };
+let secTlCond = 'B';
+let secTlLimit = 10;
+
+function buildSecPairs() {
+  const by = new Map();
+  suiteData.cases.forEach((c) => {
+    if (!by.has(c.pair_key)) by.set(c.pair_key, {});
+    by.get(c.pair_key)[c.condition] = c;
+  });
+  return Array.from(by.values()).filter((p) => p.A && p.B);
+}
+function secQuadOf(p) {
+  if (p.A.security) return p.B.security ? 'fail' : 'success';
+  return p.B.security ? 'regress' : 'benign';
+}
+function secOutcomeOf(p) {
+  if (!p.B.security) return 'none';
+  return p.B.hijack_tool && p.B.hijack_tool === p.A.hijack_tool ? 'same' : 'other';
+}
+function secOpenPair(p) {
+  pickedA = p.A.case_id;
+  pickedB = p.B.case_id;
+  updatePickerInputs();
+  afterPickChange();
+}
+function secDefenseLabel(pairs) {
+  const m = (pairs[0] && pairs[0].B.model) || '';
+  const i = m.indexOf('+');
+  return i >= 0 ? m.slice(i + 1) : '방어(B)';
+}
+function secSection(title, hint) {
+  const s = document.createElement('div');
+  s.className = 'sec-section';
+  s.innerHTML = `<div class="sec-title">${title}${hint ? ` <span class="hint">${escapeHtml(hint)}</span>` : ''}</div>`;
+  return s;
+}
+// 그룹 목록 — 어느 차트에서 무엇을 눌러도 "그 케이스들이 뭔지"를 표로 바로 보고, 행을 눌러 상세로 간다.
+function secPairList(box, title, pairs) {
+  box.innerHTML = '';
+  if (!pairs) return;
+  const head = document.createElement('div');
+  head.className = 'sec-list-head';
+  head.textContent = `${title} — ${pairs.length}쌍${pairs.length > 12 ? ' (앞 12쌍만 표시)' : ''}`;
+  box.appendChild(head);
+  pairs.slice(0, 12).forEach((p) => {
+    const row = document.createElement('div');
+    row.className = 'sec-list-row';
+    const dA = p.A.delay === null || p.A.delay === undefined ? '–' : p.A.delay;
+    const dB = p.B.delay === null || p.B.delay === undefined ? '–' : p.B.delay;
+    row.innerHTML = `<span class="sec-list-id">${escapeHtml(p.A.user_task_id)} × ${escapeHtml(p.A.injection_task_id)}</span>`
+      + `<span>A ${escapeHtml(p.A.hijack_tool || '–')} (지연 ${dA})</span>`
+      + `<span>B ${escapeHtml(p.B.hijack_tool || '–')} (지연 ${dB})</span>`
+      + `<span>${p.B.utility ? '' : '정상작업 실패'}</span>`;
+    row.onclick = () => secOpenPair(p);
+    box.appendChild(row);
+  });
+}
+
+function renderSecurityView() {
+  const box = document.getElementById('map-wrap-security');
+  if (!box || !suiteData) return;
+  box.innerHTML = '';
+  const pairs = buildSecPairs();
+  if (!pairs.length) {
+    box.innerHTML = '<div class="ov-empty" style="padding:14px">A/B 짝이 있는 케이스가 없어 방어 전/후 비교를 그릴 수 없습니다.</div>';
+    return;
+  }
+  const W = Math.max(box.clientWidth - 28, 420);
+  const def = secDefenseLabel(pairs);
+  const wrap = document.createElement('div');
+  wrap.className = 'sec-view';
+  box.appendChild(wrap);
+  wrap.appendChild(secQuadSection(pairs, def));
+  wrap.appendChild(secSankeySection(pairs, W, def));
+  wrap.appendChild(secDelaySection(pairs, W, def));
+  wrap.appendChild(secSlopeSection(pairs, W, def));
+}
+
+// (1) 방어 성공 vs 공격이 원래 안 먹힘 — A/B 짝의 4분류.
+function secQuadSection(pairs, def) {
+  const s = secSection('1. 방어가 먹혔나?', `무방어(A) vs ${def}(B) 같은 과제 쌍 ${pairs.length}개`);
+  const groups = {};
+  SEC_QUAD_ORDER.forEach((k) => { groups[k] = []; });
+  pairs.forEach((p) => groups[secQuadOf(p)].push(p));
+  const bar = document.createElement('div');
+  bar.className = 'sec-quadbar';
+  const cards = document.createElement('div');
+  cards.className = 'sec-quadcards';
+  const list = document.createElement('div');
+  list.className = 'sec-list';
+  const pick = (k) => { secSel.quad = k; secSel.flow = null; secPairList(list, SEC_QUAD[k].label, groups[k]); };
+  SEC_QUAD_ORDER.forEach((k) => {
+    const n = groups[k].length;
+    if (n) {
+      const seg = document.createElement('div');
+      seg.className = 'sec-quadseg';
+      seg.style.cssText = `flex:${n};background:${SEC_QUAD[k].color}`;
+      seg.textContent = n;
+      seg.title = `${SEC_QUAD[k].label}: ${n}쌍 — 클릭하면 목록`;
+      seg.onclick = () => pick(k);
+      bar.appendChild(seg);
+    }
+    const card = document.createElement('div');
+    card.className = 'sec-quadcard';
+    card.style.borderTopColor = SEC_QUAD[k].color;
+    card.innerHTML = `<b>${SEC_QUAD[k].label} · ${n}</b><span>${SEC_QUAD[k].sub}</span>`;
+    card.onclick = () => pick(k);
+    cards.appendChild(card);
+  });
+  s.appendChild(bar);
+  s.appendChild(cards);
+  s.appendChild(list);
+  if (secSel.quad) secPairList(list, SEC_QUAD[secSel.quad].label, groups[secSel.quad]);
+  return s;
+}
+
+// (2) Sankey — A에서 납치에 쓰인 도구 -> B에서 어떻게 됐나(납치 없음 / 다른 도구 / 같은 도구).
+function secSankeySection(pairs, W, def) {
+  const hij = pairs.filter((p) => p.A.security);
+  const s = secSection('2. 막았더니 어디로 새나?', `A에서 뚫린 ${hij.length}쌍의 납치 도구 → ${def} 적용 후 결과`);
+  if (!hij.length) { s.insertAdjacentHTML('beforeend', '<div class="ov-empty">A에서 뚫린 케이스가 없습니다.</div>'); return s; }
+  const counts = d3.rollup(hij, (v) => v.length, (p) => p.A.hijack_tool || '(unknown)');
+  const top = new Set(Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8).map((e) => e[0]));
+  const toolOf = (p) => (top.has(p.A.hijack_tool || '(unknown)') ? (p.A.hijack_tool || '(unknown)') : '기타');
+  const tools = Array.from(d3.rollup(hij, (v) => v.length, toolOf).entries())
+    .sort((a, b) => ((a[0] === '기타') - (b[0] === '기타')) || (b[1] - a[1]));
+  const total = hij.length;
+  const outCount = { none: 0, other: 0, same: 0 };
+  hij.forEach((p) => { outCount[secOutcomeOf(p)]++; });
+  const gapL = 8, gapR = 22;
+  const u = Math.max(1.5, Math.min(10, (230 - gapL * tools.length) / total));
+  const LX = 150, RX = W - 170, NW = 12;
+  const hL = total * u + gapL * (tools.length - 1);
+  const hR = total * u + gapR * 2;
+  const H = Math.max(hL, hR) + 16;
+  const svg = d3.create('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('width', '100%').style('height', H + 'px');
+  const rightY = {};
+  let ry = 8;
+  SEC_OUT_ORDER.forEach((k) => { rightY[k] = { y: ry, cur: ry }; ry += outCount[k] * u + gapR; });
+  const list = document.createElement('div');
+  list.className = 'sec-list';
+  let ly = 8;
+  tools.forEach(([tool, n]) => {
+    let cy = ly;
+    SEC_OUT_ORDER.forEach((k) => {
+      const grp = hij.filter((p) => toolOf(p) === tool && secOutcomeOf(p) === k);
+      if (!grp.length) return;
+      const h = grp.length * u, y2 = rightY[k].cur, mx = (LX + NW + RX) / 2;
+      const link = svg.append('path')
+        .attr('d', `M${LX + NW},${cy} C${mx},${cy} ${mx},${y2} ${RX},${y2} L${RX},${y2 + h} C${mx},${y2 + h} ${mx},${cy + h} ${LX + NW},${cy + h} Z`)
+        .attr('fill', SEC_OUT[k].color).attr('fill-opacity', 0.4).style('cursor', 'pointer')
+        .on('click', () => { secSel.flow = `${tool}|${k}`; secSel.quad = null; secPairList(list, `${tool} → ${SEC_OUT[k].label}`, grp); });
+      link.append('title').text(`${tool} → ${SEC_OUT[k].label}: ${grp.length}쌍 (클릭하면 목록)`);
+      rightY[k].cur += h; cy += h;
+    });
+    svg.append('rect').attr('x', LX).attr('y', ly).attr('width', NW).attr('height', n * u).attr('fill', '#6b7280');
+    svg.append('text').attr('x', LX - 6).attr('y', ly + (n * u) / 2 + 4).attr('text-anchor', 'end').attr('class', 'sec-svg-label').text(`${tool} (${n})`);
+    ly += n * u + gapL;
+  });
+  SEC_OUT_ORDER.forEach((k) => {
+    svg.append('rect').attr('x', RX).attr('y', rightY[k].y).attr('width', NW).attr('height', Math.max(outCount[k] * u, 1)).attr('fill', SEC_OUT[k].color);
+    svg.append('text').attr('x', RX + NW + 6).attr('y', rightY[k].y + (outCount[k] * u) / 2 + 4).attr('class', 'sec-svg-label').text(`${SEC_OUT[k].label} (${outCount[k]})`);
+  });
+  s.appendChild(svg.node());
+  const regress = pairs.filter((p) => secQuadOf(p) === 'regress').length;
+  const note = document.createElement('div');
+  note.className = 'sec-note';
+  note.textContent = '"납치 없음"은 방어 효과로 확정할 수 없습니다 — 이 로그에는 시도했다가 막힌 기록이 없어, 모델이 그냥 따르지 않은 경우와 구분되지 않습니다.'
+    + (regress ? ` (참고: A는 안전했는데 B에서 새로 뚫린 쌍 ${regress}개는 이 그림에 없습니다.)` : '');
+  s.appendChild(note);
+  s.appendChild(list);
+  if (secSel.flow) {
+    const [tool, k] = secSel.flow.split('|');
+    secPairList(list, `${tool} → ${SEC_OUT[k].label}`, hij.filter((p) => toolOf(p) === tool && secOutcomeOf(p) === k));
+  }
+  return s;
+}
+
+// (3) 지연 — 노출 후 납치까지 스텝 수. 값이 정수 몇 개뿐이라 박스플롯 대신 값별 막대.
+function secDelaySection(pairs, W, def) {
+  const s = secSection('3. 얼마나 빨리 뚫리나?', '주입 노출 → 첫 납치 도구 호출까지의 스텝 수');
+  const cases = suiteData.cases.filter((c) => c.security && c.delay !== null && c.delay !== undefined);
+  const skipped = suiteData.cases.filter((c) => c.security).length - cases.length;
+  if (!cases.length) { s.insertAdjacentHTML('beforeend', '<div class="ov-empty">지연을 계산할 수 있는 뚫린 케이스가 없습니다.</div>'); return s; }
+  const vals = Array.from(new Set(cases.map((c) => c.delay))).sort((a, b) => a - b);
+  const conds = ['A', 'B'];
+  const colors = { A: '#a8391f', B: '#2f6fb3' };
+  const H = 150, m = { l: 34, r: 10, t: 10, b: 30 };
+  const cnt = (cond, v) => cases.filter((c) => c.condition === cond && c.delay === v).length;
+  const ymax = Math.max(1, ...vals.flatMap((v) => conds.map((c) => cnt(c, v))));
+  const x0 = d3.scaleBand().domain(vals).range([m.l, W - m.r]).padding(0.25);
+  const x1 = d3.scaleBand().domain(conds).range([0, x0.bandwidth()]).padding(0.08);
+  const y = d3.scaleLinear().domain([0, ymax]).range([H - m.b, m.t]);
+  const svg = d3.create('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('width', '100%').style('height', H + 'px');
+  svg.append('g').attr('transform', `translate(${m.l},0)`)
+    .call(d3.axisLeft(y).ticks(Math.min(ymax, 4)).tickFormat(d3.format('d')).tickSize(-(W - m.l - m.r)))
+    .call((g) => { g.selectAll('line').attr('stroke', '#e5e7eb'); g.select('.domain').remove(); g.selectAll('text').attr('class', 'sec-svg-label'); });
+  vals.forEach((v) => conds.forEach((c) => {
+    const n = cnt(c, v);
+    svg.append('rect').attr('x', x0(v) + x1(c)).attr('y', y(n)).attr('width', x1.bandwidth()).attr('height', y(0) - y(n)).attr('fill', colors[c])
+      .append('title').text(`${c === 'A' ? '무방어' : def} · 지연 ${v}: ${n}건`);
+    if (n) svg.append('text').attr('x', x0(v) + x1(c) + x1.bandwidth() / 2).attr('y', y(n) - 3).attr('text-anchor', 'middle').attr('class', 'sec-svg-label').text(n);
+  }));
+  vals.forEach((v) => svg.append('text').attr('x', x0(v) + x0.bandwidth() / 2).attr('y', H - 14).attr('text-anchor', 'middle').attr('class', 'sec-svg-label').text(v));
+  svg.append('text').attr('x', (m.l + W - m.r) / 2).attr('y', H - 1).attr('text-anchor', 'middle').attr('class', 'sec-svg-label').text('노출 후 납치까지 스텝');
+  s.appendChild(svg.node());
+  const lg = document.createElement('div');
+  lg.className = 'sec-legend';
+  lg.innerHTML = `<span><i style="background:${colors.A}"></i>무방어(A)</span><span><i style="background:${colors.B}"></i>${escapeHtml(def)}(B)</span>`
+    + (skipped ? `<span class="hint">노출 지점을 못 찾은 ${skipped}건은 제외</span>` : '');
+  s.appendChild(lg);
+
+  // 케이스별 타임라인 — 노출(▼) → 이탈 → 납치(✖). 지연이 짧은 케이스부터.
+  const tlHead = document.createElement('div');
+  tlHead.className = 'sec-tl-head';
+  tlHead.innerHTML = '<span class="sec-title-sub">케이스별 타임라인 (지연 짧은 순)</span>';
+  ['A', 'B'].forEach((c) => {
+    const b = document.createElement('button');
+    b.className = 'chip' + (secTlCond === c ? ' active' : '');
+    b.textContent = c === 'A' ? '무방어(A)' : `${def}(B)`;
+    b.onclick = () => { secTlCond = c; secTlLimit = 10; renderSecurityView(); };
+    tlHead.appendChild(b);
+  });
+  s.appendChild(tlHead);
+  const tl = cases.filter((c) => c.condition === secTlCond).sort((a, b) => a.delay - b.delay);
+  const TW = Math.max(W - 300, 160);
+  tl.slice(0, secTlLimit).forEach((c) => {
+    const row = document.createElement('div');
+    row.className = 'sec-tl-row';
+    const n = Math.max(c.n_events - 1, 1);
+    const sx = (i) => 6 + (i / n) * (TW - 12);
+    const hj = Math.min(...c.hijack_events), ex = c.injection_exposure, dv = c.first_deviation;
+    const mid = dv !== null && dv !== undefined && dv >= ex && dv <= hj ? dv : ex;
+    const svg2 = d3.create('svg').attr('viewBox', `0 0 ${TW} 24`).attr('width', TW).style('height', '24px');
+    svg2.append('line').attr('x1', sx(0)).attr('x2', sx(n)).attr('y1', 12).attr('y2', 12).attr('stroke', '#c7cbd1');
+    if (mid > ex) svg2.append('line').attr('x1', sx(ex)).attr('x2', sx(mid)).attr('y1', 12).attr('y2', 12).attr('stroke', '#c96a2e').attr('stroke-width', 4);
+    svg2.append('line').attr('x1', sx(mid)).attr('x2', sx(hj)).attr('y1', 12).attr('y2', 12).attr('stroke', '#c81e1e').attr('stroke-width', 4);
+    svg2.append('text').attr('x', sx(ex)).attr('y', 9).attr('text-anchor', 'middle').attr('class', 'sec-svg-label').text('▼');
+    svg2.append('text').attr('x', sx(hj)).attr('y', 22).attr('text-anchor', 'middle').attr('class', 'sec-svg-label').attr('fill', '#c81e1e').text('✖');
+    row.innerHTML = `<span class="sec-tl-id" title="${escapeHtml(c.case_id)}">${escapeHtml(c.user_task_id)} × ${escapeHtml(c.injection_task_id)}</span>`;
+    row.appendChild(svg2.node());
+    row.insertAdjacentHTML('beforeend', `<span class="sec-tl-meta">${escapeHtml(c.hijack_tool || '–')} · 지연 ${c.delay}</span>`);
+    row.onclick = () => {
+      const p = pairs.find((x) => x[c.condition] && x[c.condition].case_id === c.case_id);
+      if (p) secOpenPair(p);
+    };
+    s.appendChild(row);
+  });
+  if (tl.length > secTlLimit) {
+    const more = document.createElement('button');
+    more.className = 'ghost-btn';
+    more.textContent = `더 보기 (${tl.length - secTlLimit}건 남음)`;
+    more.onclick = () => { secTlLimit += 10; renderSecurityView(); };
+    s.appendChild(more);
+  }
+  const key = document.createElement('div');
+  key.className = 'sec-note';
+  key.textContent = '▼ 주입 노출 · 주황 구간 노출→이탈 · 빨강 구간 이탈→납치 · ✖ 첫 납치 호출. 행을 누르면 해당 짝 케이스의 상세로 이동합니다.';
+  s.appendChild(key);
+  return s;
+}
+
+// (4) 짝 단위 전/후 — A에서 뚫린 각 쌍이 B에서 어떻게 변했나(기울기 그래프).
+function secSlopeSection(pairs, W, def) {
+  const s = secSection('4. 케이스별 방어 전/후', `A에서 뚫린 쌍의 납치 지연이 ${def}에서 어떻게 변했나`);
+  const rows = pairs.filter((p) => p.A.security && p.A.delay !== null && p.A.delay !== undefined);
+  if (!rows.length) { s.insertAdjacentHTML('beforeend', '<div class="ov-empty">비교할 쌍이 없습니다.</div>'); return s; }
+  const maxD = Math.max(1, ...rows.map((p) => p.A.delay), ...rows.map((p) => (p.B.security && p.B.delay != null ? p.B.delay : 0)));
+  const H = 260, top = 34, bottom = 44, gap = 26;
+  const yv = d3.scaleLinear().domain([0, maxD]).range([H - bottom - gap, top]);
+  const yNone = H - bottom + 6;
+  const AX = Math.round(W * 0.3), BX = Math.round(W * 0.7);
+  const svg = d3.create('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('width', '100%').style('height', H + 'px');
+  svg.append('text').attr('x', AX).attr('y', 14).attr('text-anchor', 'middle').attr('class', 'sec-svg-head').text('무방어 (A)');
+  svg.append('text').attr('x', BX).attr('y', 14).attr('text-anchor', 'middle').attr('class', 'sec-svg-head').text(`${def} (B)`);
+  [AX, BX].forEach((x) => svg.append('line').attr('x1', x).attr('x2', x).attr('y1', top - 8).attr('y2', yv(0) + 8).attr('stroke', '#e5e7eb'));
+  svg.append('rect').attr('x', BX - 60).attr('y', yNone - 10).attr('width', 120).attr('height', 22).attr('fill', '#15803d').attr('fill-opacity', 0.1);
+  svg.append('text').attr('x', BX).attr('y', yNone + 5).attr('text-anchor', 'middle').attr('class', 'sec-svg-label').text('납치 없음');
+  [0, maxD].forEach((v) => svg.append('text').attr('x', AX - 10).attr('y', yv(v) + 4).attr('text-anchor', 'end').attr('class', 'sec-svg-label').text(`${v} 스텝`));
+  rows.forEach((p) => {
+    const bHij = p.B.security && p.B.delay !== null && p.B.delay !== undefined;
+    const yb = bHij ? yv(p.B.delay) : yNone;
+    const ya = yv(p.A.delay);
+    const color = !p.B.security ? '#15803d' : (bHij && p.B.delay > p.A.delay ? '#c96a2e' : '#c81e1e');
+    const g = svg.append('g').style('cursor', 'pointer').on('click', () => secOpenPair(p));
+    g.append('title').text(`${p.A.user_task_id} × ${p.A.injection_task_id}: A 지연 ${p.A.delay} → B ${bHij ? '지연 ' + p.B.delay : (p.B.security ? '뚫림(지연 미상)' : '납치 없음')}${p.B.utility ? '' : ' · 정상 작업도 실패'}`);
+    g.append('line').attr('x1', AX).attr('y1', ya).attr('x2', BX).attr('y2', yb).attr('stroke', color).attr('stroke-width', 1.6).attr('stroke-opacity', 0.75);
+    g.append('circle').attr('cx', AX).attr('cy', ya).attr('r', 3.5).attr('fill', color);
+    if (!p.B.utility) g.append('path').attr('d', `M${BX},${yb - 6} l6,6 l-6,6 l-6,-6 z`).attr('fill', '#fff').attr('stroke', color).attr('stroke-width', 1.6);
+    else g.append('circle').attr('cx', BX).attr('cy', yb).attr('r', 3.5).attr('fill', color);
+  });
+  s.appendChild(svg.node());
+  const lg = document.createElement('div');
+  lg.className = 'sec-legend';
+  lg.innerHTML = '<span><i style="background:#15803d"></i>납치 없음</span><span><i style="background:#c96a2e"></i>더 늦게 납치</span><span><i style="background:#c81e1e"></i>같거나 더 빠름</span><span>◇ 정상 작업(utility)도 실패</span>';
+  s.appendChild(lg);
+  const utilLoss = pairs.filter((p) => !p.B.utility).length;
+  const unknown = pairs.filter((p) => p.A.security).length - rows.length;
+  const note = document.createElement('div');
+  note.className = 'sec-note';
+  note.textContent = `선(쌍)을 누르면 해당 A/B 상세로 이동합니다. ${def} 적용 후 정상 작업이 실패한 쌍: ${utilLoss}/${pairs.length}.`
+    + (unknown ? ` A 노출 지점을 못 찾은 ${unknown}쌍은 제외.` : '');
+  s.appendChild(note);
+  return s;
+}
+
+// ---------------------------------------------------------- validity bar
+// 지도를 보기 전에 "이 지도(residual UMAP)가 실제로 hijack_tool을 얼마나
+// 잘 구분하는가"부터 보여준다. build_output.py가 이미 계산해서 내려주는
+// cluster_validation(ARI/NMI)·validation(실루엣 순열검정 p-value)을 쓴다 —
+// 새 계산이 아니라, 계산은 되어 있는데 화면 어디에도 안 쓰이던 값을 꺼내
+// 쓰는 것.
+function renderValidityBar(cases) {
+  const bar = document.getElementById('validity-bar');
+  if (bar.classList.contains('hidden') || !suiteData) return;
+
+  const cv = suiteData.cluster_validation || {};
+  const rawAgree = cv.raw && cv.raw.hijack_tool;
+  const resAgree = cv.residual && cv.residual.hijack_tool;
+  const pv = suiteData.validation || {};
+  const resPvalue = pv.residual_pvalue && pv.residual_pvalue.hijack_tool;
+
+  const box = document.getElementById('validity-ari');
+  const legendBox = document.getElementById('validity-ari-legend');
+  box.innerHTML = '';
+  legendBox.innerHTML = '';
+  if (!rawAgree && !resAgree) {
+    box.innerHTML = '<span class="validity-value" style="font-size:12px;color:var(--text-dim)">라벨 부족으로 계산 불가</span>';
+  } else {
+    // ARI 범위는 이론상 [-1, 1]이지만 실제로는 대부분 [-0.3, 0.6] 안에 있으므로
+    // -0.5~1.0을 트랙 전체 폭으로 잡아 작은 차이도 눈에 띄게 한다.
+    const lo = -0.5, hi = 1.0;
+    const toPct = (v) => Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
+    const zeroPct = toPct(0);
+    const track = document.createElement('div');
+    track.className = 'validity-track';
+    box.appendChild(track);
+    const zero = document.createElement('div');
+    zero.className = 'validity-zero';
+    box.appendChild(zero);
+
+    [
+      { agree: rawAgree, cls: 'raw', top: 4 },
+      { agree: resAgree, cls: 'residual', top: 16 },
+    ].forEach(({ agree, cls, top }) => {
+      if (!agree) return;
+      const p1 = toPct(0), p2 = toPct(agree.ari);
+      const left = Math.min(p1, p2), width = Math.max(Math.abs(p2 - p1), 1);
+      const fill = document.createElement('div');
+      fill.className = `validity-fill ${cls}`;
+      fill.style.left = left + '%';
+      fill.style.width = width + '%';
+      fill.style.top = top + 'px';
+      fill.title = `${cls}: ARI=${agree.ari.toFixed(3)}, NMI=${agree.nmi.toFixed(3)}, 순도=${(agree.weighted_purity * 100).toFixed(0)}%`;
+      box.appendChild(fill);
+    });
+
+    legendBox.innerHTML = `<span class="leg-raw">raw ${rawAgree ? rawAgree.ari.toFixed(3) : '–'}</span>`
+      + `<span class="leg-residual">residual ${resAgree ? resAgree.ari.toFixed(3) : '–'}</span>`;
+    if (resPvalue !== null && resPvalue !== undefined) {
+      const sig = resPvalue < 0.05;
+      legendBox.innerHTML += `<span class="validity-badge ${sig ? 'sig' : 'nosig'}">p=${resPvalue.toFixed(3)} ${sig ? '(우연 아님)' : '(우연과 구분 안 됨)'}</span>`;
+    }
+  }
+
+  // gt_overlap 비율: hijack_tool이 그 케이스의 ground_truth 함수 목록에도
+  // 포함된 케이스(=이미 정상 절차에 있는 도구를 재사용한 공격) 비율.
+  // 클라이언트에서 바로 계산 가능(별도 API 불필요) — cases 페이로드에
+  // hijack_tool과 ground_truth가 이미 있다.
+  const hijacked = cases.filter((d) => d.hijack_tool);
+  const overlapping = hijacked.filter((d) => (d.ground_truth || []).includes(d.hijack_tool));
+  const rate = hijacked.length ? (overlapping.length / hijacked.length) * 100 : null;
+  const gtEl = document.getElementById('validity-gt-overlap');
+  gtEl.textContent = rate === null ? 'n/a' : `${rate.toFixed(0)}% (${overlapping.length}/${hijacked.length}건)`;
+
+  renderRecallComparison(cases);
+}
+
+// hijack_events(라벨, feature로는 안 쓰고 검증에만 씀)가 잔차에 남는
+// 비율 — existence(함수명 매칭)만 볼 때 vs 인자잔차 신호까지 더할 때.
+// pipeline_study/argument_residual_diagnostic.py에서 실측했던 것과 같은
+// 지표를 실제 앱 데이터 위에서 보여준다.
+function renderRecallComparison(cases) {
+  const box = document.getElementById('validity-recall');
+  const withHijack = cases.filter((d) => d.hijack_events && d.hijack_events.length);
+  if (!withHijack.length) { box.innerHTML = '<span class="validity-value" style="font-size:12px;color:var(--text-dim)">hijack 케이스 없음</span>'; return; }
+
+  let existenceHits = 0, combinedHits = 0, total = 0;
+  withHijack.forEach((d) => {
+    const byIndex = new Map((d.events || []).map((ev) => [ev.index, ev]));
+    d.hijack_events.forEach((hIdx) => {
+      const ev = byIndex.get(hIdx);
+      if (!ev) return;
+      total += 1;
+      const existenceResidual = !ev.matched_to_gt;
+      if (existenceResidual) existenceHits += 1;
+      if (existenceResidual || ev.arg_mismatch) combinedHits += 1;
+    });
+  });
+  if (!total) { box.innerHTML = '<span class="validity-value" style="font-size:12px;color:var(--text-dim)">계산 불가</span>'; return; }
+
+  const existencePct = (existenceHits / total) * 100;
+  const combinedPct = (combinedHits / total) * 100;
+  box.innerHTML = '';
+  [
+    { label: 'existence만', pct: existencePct, color: '#9aa1a8' },
+    { label: '+ 인자잔차', pct: combinedPct, color: '#c98a2e' },
+  ].forEach(({ label, pct, color }) => {
+    const row = document.createElement('div');
+    row.className = 'sec-metric-row';
+    row.innerHTML = `<span class="sec-metric-label">${label}</span>`
+      + `<div class="sec-metric-track"><div class="sec-metric-fill" style="width:${pct}%;background:${color}"></div></div>`
+      + `<span class="sec-metric-val">${pct.toFixed(0)}%</span>`;
+    box.appendChild(row);
+  });
+  if (combinedPct > existencePct + 0.5) {
+    const note = document.createElement('div');
+    note.className = 'composition-note';
+    note.textContent = `인자잔차 신호를 더하면 hijack 이벤트 중 ${(combinedPct - existencePct).toFixed(0)}%p 더 잔차로 남습니다 `
+      + `(도구 재사용형 공격을 존재 매칭만으로는 놓치고 있었다는 뜻 — 단, 이 신호는 suite 다수결 근사라 확정 판정은 아닙니다).`;
+    box.appendChild(note);
+  }
+}
+
+// 상세 화면(4번 구역) — "지금 보고 있는 이 케이스"에 한정된 클린런/인자
+// 차이 신호. suite 전체 통계(신뢰도 바의 existence vs +인자잔차 recall)는
+// 오버뷰에만 두고, 여기서는 그 통계로 이어지는 안내만 준다 — 케이스 하나
+// 보는 화면에 suite 전체 차트를 욱여넣지 않기 위해서.
+function renderArgSummary() {
+  const box = document.getElementById('argsummary-body');
+  if (!box || !suiteData) return;
+  box.innerHTML = '';
+  if (!pickedA) return;
+
+  const describe = (caseId, label) => {
+    const d = suiteData.cases.find((c) => c.case_id === caseId);
+    if (!d) return null;
+    const mismatches = (d.events || []).filter((ev) => ev.arg_mismatch);
+    const wrap = document.createElement('div');
+    wrap.className = 'argsummary-case';
+    if (!mismatches.length) {
+      wrap.innerHTML = `<div class="argsummary-case-title">${label} — ${d.case_id}</div>`
+        + `<div class="argsummary-empty">인자잔차 신호 없음 (함수명이 GT와 다른 곳(존재잔차)은 있을 수 있음 — 원문 탭에서 확인)</div>`;
+      return wrap;
+    }
+    const title = document.createElement('div');
+    title.className = 'argsummary-case-title';
+    title.textContent = `${label} — ${d.case_id} · 인자잔차 ${mismatches.length}건 (클릭: injection 없었다면?)`;
+    wrap.appendChild(title);
+    mismatches.forEach((ev) => {
+      const args = ev.args && Object.keys(ev.args).length ? JSON.stringify(ev.args) : '{}';
+      const row = document.createElement('div');
+      row.className = 'argsummary-row clickable';
+      row.innerHTML = `<span class="argsummary-idx">e${ev.index}</span>`
+        + `<span class="argsummary-fn">${escapeHtml(ev.function || '')}(${escapeHtml(args)})</span>`
+        + `<span class="argsummary-note">클릭하면 injection이 없었다면 어떤 값이었을지 클린런과 비교합니다 →</span>`;
+      row.onclick = () => openArgCompare(d.case_id, ev.index);
+      wrap.appendChild(row);
+    });
+    return wrap;
+  };
+
+  const a = describe(pickedA, '트레이스A');
+  if (a) box.appendChild(a);
+  const b = pickedB ? describe(pickedB, '트레이스B') : null;
+  if (b) box.appendChild(b);
+
+  const allCases = suiteData.cases;
+  const nWithMismatch = allCases.filter((d) => (d.n_arg_mismatch || 0) > 0).length;
+  const foot = document.createElement('div');
+  foot.className = 'argsummary-foot';
+  foot.textContent = `'${currentSuite}' suite 전체 ${allCases.length}건 중 ${nWithMismatch}건에 인자잔차 신호가 있습니다. `
+    + `이게 실제 탐지율(recall)에 얼마나 영향을 주는지는 오버뷰의 신뢰도 바에서 확인하세요.`;
+  box.appendChild(foot);
+}
+
+// ------------------------------------------------------- 클린런 비교 화면(5)
+function openArgCompare(caseId, eventIndex) {
+  argCompareTarget = { caseId, eventIndex };
+  renderAll();
+}
+function closeArgCompare() {
+  argCompareTarget = null;
+  renderAll();
+}
+
+// 이 함수의 GT 인자를 실제로 "복원"한다 — 우선순위:
+//   1) 이 트레이스 안에서 같은 함수가 인자잔차 없이(=정상적으로) 다시
+//      불린 적이 있다면 그 실제 인자값을 쓴다 (가장 신뢰도 높음 — 추정이
+//      아니라 이 케이스 자신의 실제 실행 기록).
+//   2) 없다면 suite 다수결 참고값을 "추정"이라고 표시하고 대신 쓴다.
+function resolveExpectedArgs(caseData, functionName, excludeIndex, majorityDetailSource) {
+  const realOccurrence = (caseData.events || []).find((ev) =>
+    ev.function === functionName && ev.matched_to_gt && !ev.arg_mismatch && ev.index !== excludeIndex);
+  if (realOccurrence) return { args: realOccurrence.args || {}, source: 'real', fromIndex: realOccurrence.index };
+  // 다수결 참고값 — arg_mismatch_detail이 있는 이벤트에서 expected를 모은다
+  const est = {};
+  (caseData.events || []).forEach((ev) => {
+    if (ev.function === functionName && ev.arg_mismatch_detail) {
+      Object.entries(ev.arg_mismatch_detail).forEach(([k, v]) => { est[k] = v.expected; });
+    }
+  });
+  return { args: est, source: Object.keys(est).length ? 'estimated' : 'unknown', fromIndex: null };
+}
+
+function renderArgCompare() {
+  const panel = document.getElementById('panel-argcompare');
+  if (!panel) return;
+  if (!argCompareTarget) return;
+  const d = suiteData.cases.find((c) => c.case_id === argCompareTarget.caseId);
+  const targetEv = d && (d.events || []).find((ev) => ev.index === argCompareTarget.eventIndex);
+  document.querySelector('#panel-argcompare .panel-head h2').innerHTML =
+    `<span class="fig-label">5</span>클린런 비교 — ${escapeHtml(argCompareTarget.caseId)} · e${argCompareTarget.eventIndex}`;
+  if (!d || !targetEv) return;
+  const detail = targetEv.arg_mismatch_detail || {};
+
+  // --- 1) diff 카드: GT 추정값 vs 실제(hijack) 값을 크게 나란히 ---
+  const diffBox = document.getElementById('argcompare-diffcard');
+  diffBox.innerHTML = '';
+  const keys = Object.keys(detail);
+  if (!keys.length) {
+    diffBox.className = 'argcompare-diffcard empty';
+    diffBox.textContent = '이 이벤트엔 인자 차이 정보가 없습니다.';
+  } else {
+    diffBox.className = 'argcompare-diffcard';
+    keys.forEach((k) => {
+      const v = detail[k];
+      const item = document.createElement('div');
+      item.className = 'diffcard-item';
+      item.innerHTML = `<span class="diffcard-key">${escapeHtml(targetEv.function)}.${escapeHtml(k)}</span>`
+        + `<span class="diffcard-compare"><span class="diffcard-expected">${escapeHtml(String(v.expected))}</span>`
+        + `<span class="diffcard-arrow">→ 실제 실행에서는 →</span>`
+        + `<span class="diffcard-actual">${escapeHtml(String(v.actual))}</span></span>`
+        + `<span class="diffcard-share">GT 추정값 근거: 이 suite에서 ${escapeHtml(targetEv.function)}.${escapeHtml(k)}의 ${(v.expected_share * 100).toFixed(0)}%가 이 값을 씀</span>`;
+      diffBox.appendChild(item);
+    });
+  }
+
+  // --- 2) 왼쪽: 추정 클린런 (GT 함수 시퀀스를, 이 케이스 자신의 실제 정상
+  // 실행 기록으로 최대한 채우고, 못 채우면 suite 다수결로 대체) ---
+  const cleanBox = document.getElementById('argcompare-clean');
+  cleanBox.innerHTML = '';
+  (d.ground_truth || []).forEach((fn) => {
+    const isTargetFn = fn === targetEv.function;
+    const resolved = resolveExpectedArgs(d, fn, isTargetFn ? targetEv.index : -1);
+    const step = document.createElement('div');
+    step.className = 'argcompare-step ' + (resolved.source === 'real' ? 'real' : resolved.source === 'estimated' ? 'estimated' : '');
+    const argsText = Object.keys(resolved.args).length ? JSON.stringify(resolved.args) : '{}';
+    let note = '';
+    if (resolved.source === 'real') note = `이 트레이스에서 실제로 정상 실행된 값 (e${resolved.fromIndex})`;
+    else if (resolved.source === 'estimated') note = 'suite 다수결로 추정 (이 트레이스 안에는 정상 실행 기록이 없음)';
+    else note = '추정 불가 (표본 부족)';
+    step.innerHTML = `<div class="argcompare-step-fn">${escapeHtml(fn)}</div>`
+      + `<div class="argcompare-step-args">${escapeHtml(argsText)}</div>`
+      + `<div class="argcompare-step-note">${note}</div>`;
+    cleanBox.appendChild(step);
+  });
+
+  // --- 3) 오른쪽: 실제 실행 전체, 문제의 이벤트를 강조 ---
+  const actualBox = document.getElementById('argcompare-actual');
+  actualBox.innerHTML = '';
+  (d.events || []).forEach((ev) => {
+    const step = document.createElement('div');
+    const isTarget = ev.index === targetEv.index;
+    step.className = 'argcompare-step' + (isTarget ? ' diverge' : '');
+    const argsText = ev.args && Object.keys(ev.args).length ? JSON.stringify(ev.args) : '';
+    step.innerHTML = `<div class="argcompare-step-fn">e${ev.index} ${escapeHtml(ev.function || ev.role)}</div>`
+      + (argsText ? `<div class="argcompare-step-args">${escapeHtml(argsText)}</div>` : '')
+      + (isTarget ? `<div class="argcompare-step-note">← 여기서 GT 추정값과 실제 인자가 갈립니다</div>` : '');
+    actualBox.appendChild(step);
+  });
 }
 
 // --------------------------------------------------------------- event log
@@ -371,59 +1139,6 @@ function renderEventLog(cases) {
   });
 }
 
-function renderSecurityOutcomes() {
-  const sa = suiteData.security_analysis;
-  const body = document.getElementById('security-body');
-  const summaryLine = document.getElementById('security-summary-line');
-  body.innerHTML = '';
-  if (!sa) { summaryLine.textContent = ''; return; }
-  const a = sa.conditions.A, b = sa.conditions.B;
-  summaryLine.textContent = a && b
-    ? `— ASR A ${(a.targeted_asr * 100).toFixed(0)}% → B ${(b.targeted_asr * 100).toFixed(0)}% (펼쳐서 상세)`
-    : '';
-  const metricRow = (label, val, ci, color) => {
-    const pct = val * 100;
-    const ciHtml = ci ? `<div style="font-size:9.5px;color:#8a8578;margin:-4px 0 6px 98px;">95% CI [${(ci[0] * 100).toFixed(0)}–${(ci[1] * 100).toFixed(0)}%]</div>` : '';
-    return `<div class="sec-metric-row"><span class="sec-metric-label">${label}</span>`
-      + `<div class="sec-metric-track"><div class="sec-metric-fill" style="width:${pct}%;background:${color}"></div></div>`
-      + `<span class="sec-metric-val">${pct.toFixed(0)}%</span></div>${ciHtml}`;
-  };
-  ['A', 'B'].forEach((cond) => {
-    const c = sa.conditions[cond];
-    if (!c) return;
-    const card = document.createElement('div');
-    card.className = 'sec-card';
-    card.innerHTML = `<div class="sec-card-title">조건 ${cond} (${cond === 'A' ? '무방어' : '방어'}) · n=${c.n}</div>`
-      + metricRow('Targeted ASR', c.targeted_asr, c.targeted_asr_ci95, '#7a2a20')
-      + metricRow('과제 성공률', c.task_utility_rate, c.task_utility_ci95, '#4d9c76')
-      + metricRow('안전 완료율', c.safe_completion_rate, c.safe_completion_ci95, '#1f3a5f');
-    body.appendChild(card);
-  });
-  const pd = sa.paired_defense;
-  if (pd) {
-    const t = pd.security_transitions;
-    const card = document.createElement('div');
-    card.className = 'sec-card';
-    card.innerHTML = `<div class="sec-card-title">A→B 짝 비교 (n=${pd.n_pairs}쌍)</div>`
-      + `<div class="sec-transition-grid">`
-      + `<div class="sec-transition-cell" style="background:#e6ebe0;"><span class="n">${t.blocked}</span>차단됨 (뚫림→방어)</div>`
-      + `<div class="sec-transition-cell" style="background:#ece0da;"><span class="n">${t.regressed}</span>퇴행 (방어→뚫림)</div>`
-      + `<div class="sec-transition-cell" style="background:#f2ead6;"><span class="n">${t.still_hijacked}</span>여전히 뚫림</div>`
-      + `<div class="sec-transition-cell" style="background:#e9e6dd;"><span class="n">${t.still_safe}</span>여전히 안전</div>`
-      + `</div>`
-      + `<div class="sec-note">McNemar 양측 exact p=${pd.mcnemar_exact_pvalue.toFixed(4)} · 차단율(기준 뚫림 대비) ${(pd.blocked_rate_given_baseline_hijack * 100).toFixed(0)}% · `
-      + `퇴행율(기준 안전 대비) ${(pd.regression_rate_given_baseline_safe * 100).toFixed(0)}%</div>`;
-    body.appendChild(card);
-  }
-  if (sa.metric_scope && sa.metric_scope.note) {
-    const note = document.createElement('div');
-    note.className = 'sec-note';
-    note.style.cssText = 'flex-basis:100%;';
-    note.textContent = sa.metric_scope.note;
-    body.appendChild(note);
-  }
-}
-
 // --------------------------------------------------------------- trace detail (원문)
 function renderTraceDetail() {
   const box = document.getElementById('trace-detail');
@@ -439,11 +1154,15 @@ function renderTraceDetail() {
   renderDetailBody(detailWhich);
 }
 
-function eventRowHtml(ev) {
+function eventRowHtml(ev, caseId) {
   const roleLabel = { user: 'user', tool_call: 'tool_call', tool_resp: 'tool_resp' }[ev.role] || ev.role;
   const args = ev.args && Object.keys(ev.args).length ? JSON.stringify(ev.args) : '';
   const flags = [];
   if (ev.role !== 'user') flags.push(ev.matched_to_gt ? '<span class="evt-flag gt-match">GT매칭</span>' : '<span class="evt-flag gt-residual">잔차</span>');
+  // 인자잔차(클린런 비교)는 원문 보기에서는 배지로 안 보여준다 — 4번
+  // "클린런/GT 인자 차이 요약" 패널이 이미 그 목록과 진입점을 갖고 있어서
+  // 원문 쪽에 또 두면 중복이고, 좁은 칸에서 배지 줄바꿈으로 겹쳐 보이는
+  // 원인이었다.
   if (ev.injected) flags.push('<span class="evt-flag injected">주입됨</span>');
   return `<div class="evt-row ${ev.injected ? 'evt-injected' : ''}">`
     + `<div class="evt-idx">e${ev.index}</div>`
@@ -465,7 +1184,7 @@ function renderDetailBody(which) {
   }
   const c = suiteData.cases.find((x) => x.case_id === caseId);
   if (!c) { body.innerHTML = ''; pairBtn.classList.add('hidden'); return; }
-  body.innerHTML = c.events.map(eventRowHtml).join('');
+  body.innerHTML = c.events.map((ev) => eventRowHtml(ev, c.case_id)).join('');
   const pair = suiteData.cases.find((x) => x.pair_key === c.pair_key && x.condition !== c.condition);
   if (pair) {
     pairBtn.classList.remove('hidden');
@@ -632,6 +1351,79 @@ function renderClusterPicker(cases) {
     };
     box.appendChild(btn);
   });
+
+  renderClusterComposition(counts);
+}
+
+// 군집 구성 근거 — "왜 이 케이스들이 같은 군집으로 묶였는가"를 요약 지표
+// 하나(순도%)로 뭉개지 않고 detail로 보여준다(Ch1.6: 요약은 무엇을 버렸는지
+// 말해주지 않는다). 계층적 군집화(average linkage)는 잔차 DTW 거리평균이
+// 가장 가까운 케이스끼리 묶으므로, "그 거리를 실제로 좌우한 게 무엇인가"를
+// 두 축으로 분해한다:
+//   1) hijack_tool 분포 - 이 군집이 실제로 같은 공격 유형을 모은 것인지,
+//      아니면 우연히 가까워진 것인지
+//   2) 잔차에 가장 흔한 함수 - 거리를 지배한 게 진짜 공격 신호인지, 아니면
+//      get_day_calendar_events 같은 무관한 부가조회(benign 잡음)인지
+//      (pipeline_study의 cluster_explain.py 실측에서 실제로 이게 갈렸다)
+function renderClusterComposition(counts) {
+  const box = document.getElementById('cluster-composition');
+  if (selectedCluster === null || !counts || !counts.has(selectedCluster)) {
+    box.classList.add('hidden');
+    return;
+  }
+  const ids = new Set(counts.get(selectedCluster));
+  const members = suiteData.cases.filter((d) => ids.has(d.case_id));
+  box.classList.remove('hidden');
+
+  // --- hijack_tool 분포 ---
+  const hijackCounts = new Map();
+  members.forEach((d) => {
+    const key = d.hijack_tool || 'None';
+    hijackCounts.set(key, (hijackCounts.get(key) || 0) + 1);
+  });
+  const hijackEntries = Array.from(hijackCounts.entries()).sort((a, b) => b[1] - a[1]);
+  const hijackColor = hijackToolColorScale(hijackEntries.map((e) => e[0]));
+  const hijackMax = Math.max(...hijackEntries.map((e) => e[1]), 1);
+  const hijackBox = document.getElementById('composition-hijack-bars');
+  hijackBox.innerHTML = '';
+  hijackEntries.forEach(([name, count]) => {
+    const row = document.createElement('div');
+    row.className = 'composition-row';
+    row.innerHTML = `<span class="composition-swatch" style="background:${hijackColor(name)}"></span>`
+      + `<span class="composition-label">${name}</span>`
+      + `<div class="composition-bar-track"><div class="composition-bar-fill" style="width:${(count / hijackMax) * 100}%;background:${hijackColor(name)}"></div></div>`
+      + `<span class="composition-count">${count}</span>`;
+    hijackBox.appendChild(row);
+  });
+
+  // --- 잔차(existence residual, matched_to_gt=false)에 가장 흔한 함수 top6 ---
+  const funcCounts = new Map();
+  members.forEach((d) => {
+    (d.events || []).forEach((ev) => {
+      if (ev.matched_to_gt) return; // GT와 매칭된 정상 이벤트는 잔차가 아니므로 제외
+      const key = ev.function || ev.role;
+      funcCounts.set(key, (funcCounts.get(key) || 0) + 1);
+    });
+  });
+  const funcEntries = Array.from(funcCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  const funcMax = Math.max(...funcEntries.map((e) => e[1]), 1);
+  const funcBox = document.getElementById('composition-func-bars');
+  funcBox.innerHTML = '';
+  funcEntries.forEach(([name, count]) => {
+    const row = document.createElement('div');
+    row.className = 'composition-row';
+    row.innerHTML = `<span class="composition-swatch" style="background:var(--accent)"></span>`
+      + `<span class="composition-label">${name}</span>`
+      + `<div class="composition-bar-track"><div class="composition-bar-fill" style="width:${(count / funcMax) * 100}%;background:var(--accent)"></div></div>`
+      + `<span class="composition-count">${count}</span>`;
+    funcBox.appendChild(row);
+  });
+
+  const hijackShare = members.length - (hijackCounts.get('None') || 0);
+  document.getElementById('composition-note').textContent =
+    `이 군집 ${members.length}건 중 ${hijackShare}건이 공격 케이스. `
+    + `잔차 최빈 함수가 hijack_tool과 다르면(위 두 목록의 1위가 다르면), `
+    + `이 군집을 묶은 주된 이유가 공격 신호가 아니라 다른 부가행동일 수 있음.`;
 }
 
 function highlightIds(ids) {
@@ -669,7 +1461,14 @@ function renderMap(svgId, cases, coordField, withBrush, isolationField) {
   svg.selectAll('*').remove();
   const width = svgEl.clientWidth || 400;
   const height = svgEl.clientHeight || 300;
-  const margin = { top: 14, right: 14, bottom: 30, left: 38 };
+  // 점 반지름(최대 point-size*2.0, 이상치 링까지 포함하면 더 커짐)만큼
+  // 여유를 더 두지 않으면, 극단값(도메인 min/max)에 있는 케이스의 원이
+  // 축 경계나 패널 테두리에 걸려 "잘린" 것처럼 보인다 — suite마다 UMAP
+  // 좌표 분포가 달라 어느 suite는 우연히 여유가 있고 어느 suite는 딱
+  // 걸려서 이 문제가 suite별로 다르게 나타났다. 고정 픽셀 여유를
+  // margin에 더해 점 크기와 무관하게 항상 안전하게 만든다.
+  const pointPad = 18;
+  const margin = { top: 14 + pointPad, right: 14 + pointPad, bottom: 30 + pointPad, left: 38 + pointPad };
 
   if (!cases.length) return;
 
@@ -831,15 +1630,26 @@ function updatePickerInputs() {
   document.getElementById('pick-b').value = pickedB || '';
 }
 
+function setTraceViewTab(view) {
+  traceViewTab = view;
+  document.querySelectorAll('#trace-view-tabs .tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+  document.getElementById('trace-view-raw').classList.toggle('hidden', view !== 'raw');
+  document.getElementById('trace-view-compare').classList.toggle('hidden', view !== 'compare');
+}
+
 function maybeCompare() {
   if (pickedA && pickedB && pickedA !== pickedB) {
     document.getElementById('analysis-empty-hint').classList.add('hidden');
     runCompare();
+    setTraceViewTab('compare'); // B까지 골랐으면 바로 비교 결과를 보여준다
   } else {
     compareResult = null;
     document.getElementById('compare-body').classList.add('hidden');
     document.getElementById('dtw-value').textContent = '–';
-    document.getElementById('analysis-empty-hint').classList.toggle('hidden', !!pickedA);
+    // 지도·검색 패널이 이미 "케이스 선택" 안내를 하므로(trace-empty-hint),
+    // 여기서는 중복 안내 대신 "A는 골랐으니 B도 고르라"는 다음 행동만 보여준다.
+    document.getElementById('analysis-empty-hint').classList.toggle('hidden', !pickedA);
+    if (traceViewTab === 'compare') setTraceViewTab('raw'); // 비교할 B가 없어지면 원문 탭으로
   }
   renderNeighborEvidence();
 }
@@ -937,13 +1747,14 @@ function renderAlignRows() {
 
   const rows = [];
   rows.push({ label: '정답 (GT)' + (sameGT ? '' : ' · 트레이스A기준'), key: 'gtA', items: cmp.case_a.ground_truth.map((fn, i) => ({ idx: i, cls: 'gt', text: fn })) });
+  const clsFor = (matched, argMismatch) => (matched ? (argMismatch ? 'matched arg-mismatch' : 'matched') : 'residual');
   rows.push({
     label: `트레이스A (조건 ${condLabel(cmp.case_a.condition)})`, key: 'a',
-    items: cmp.events_a.map((e, i) => ({ idx: i, text: e.function || e.role, injected: e.injected, sentence: e.sentence, cls: cmp.gt_align_a.matched_to_gt[i] ? 'matched' : 'residual' })),
+    items: cmp.events_a.map((e, i) => ({ idx: i, text: e.function || e.role, injected: e.injected, sentence: e.sentence, cls: clsFor(cmp.gt_align_a.matched_to_gt[i], e.arg_mismatch) })),
   });
   rows.push({
     label: `트레이스B (조건 ${condLabel(cmp.case_b.condition)})`, key: 'b',
-    items: cmp.events_b.map((e, i) => ({ idx: i, text: e.function || e.role, injected: e.injected, sentence: e.sentence, cls: cmp.gt_align_b.matched_to_gt[i] ? 'matched' : 'residual' })),
+    items: cmp.events_b.map((e, i) => ({ idx: i, text: e.function || e.role, injected: e.injected, sentence: e.sentence, cls: clsFor(cmp.gt_align_b.matched_to_gt[i], e.arg_mismatch) })),
   });
   if (!sameGT) rows.push({ label: '정답 (GT) · 트레이스B기준', key: 'gtB', items: cmp.case_b.ground_truth.map((fn, i) => ({ idx: i, cls: 'gt', text: fn })) });
 
@@ -966,7 +1777,29 @@ function renderAlignRows() {
   });
 
   document.getElementById('diagnosis').innerHTML = buildDiagnosis(cmp);
+  renderDtwCostStrip();
   updatePlayhead();
+}
+
+// DTW가 실제로 계산하는 값(정렬 경로 각 스텝의 로컬 코사인 거리)을 색
+// 띠로 보여준다 — 순차형 속성(0=완전히 같음, 값이 클수록 다름)이므로
+// 무지개가 아니라 단일 색조(파랑) 휘도 램프를 쓴다(distance matrix와
+// 동일한 컬러맵, Ch10.3.2).
+function renderDtwCostStrip() {
+  const cmp = compareResult;
+  const box = document.getElementById('dtw-cost-strip');
+  box.innerHTML = '';
+  if (!cmp.local_cost || !cmp.local_cost.length) return;
+  const max = Math.max(...cmp.local_cost, 1e-6);
+  cmp.local_cost.forEach((c, i) => {
+    const seg = document.createElement('div');
+    seg.className = 'dtw-cost-seg';
+    const t = Math.max(0, Math.min(1, c / max));
+    seg.style.background = d3.interpolateBlues(0.12 + t * 0.8);
+    seg.title = `step ${i + 1}/${cmp.local_cost.length}: 로컬 거리 ${c.toFixed(3)}`;
+    seg.onclick = () => { scrubIndex = i; document.getElementById('scrub').value = i; updatePlayhead(); };
+    box.appendChild(seg);
+  });
 }
 
 function markCell(key, idx) {
@@ -980,6 +1813,7 @@ function updatePlayhead() {
   const cmp = compareResult;
   if (!cmp) return;
   document.querySelectorAll('.align-cell').forEach((c) => c.classList.remove('playhead'));
+  document.querySelectorAll('.dtw-cost-seg').forEach((c, i) => c.classList.toggle('playhead', i === scrubIndex));
   const step = cmp.path[scrubIndex];
   if (!step) return;
   const [aIdx, bIdx] = step;
@@ -1077,6 +1911,26 @@ function resetZoom(svgId) {
 
 // --------------------------------------------------------------- wiring
 function wireControls() {
+  document.getElementById('close-detail-btn').onclick = () => {
+    pickedA = null; pickedB = null;
+    updatePickerInputs();
+    afterPickChange();
+  };
+  document.getElementById('argsummary-goto-overview').onclick = () => {
+    pickedA = null; pickedB = null;
+    updatePickerInputs();
+    afterPickChange();
+    setOverviewStripExpanded(true);
+    const bar = document.getElementById('validity-bar');
+    bar.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    bar.classList.add('flash');
+    setTimeout(() => bar.classList.remove('flash'), 1200);
+  };
+  document.getElementById('overview-strip-toggle').onclick = () => {
+    const detail = document.getElementById('overview-strip-detail');
+    setOverviewStripExpanded(detail.classList.contains('collapsed'));
+  };
+  document.getElementById('argcompare-back-btn').onclick = closeArgCompare;
   document.querySelectorAll('#condition-filter .chip').forEach((btn) => {
     btn.onclick = () => {
       document.querySelectorAll('#condition-filter .chip').forEach((b) => b.classList.remove('active'));
@@ -1124,14 +1978,15 @@ function wireControls() {
     };
   });
 
+  document.querySelectorAll('#trace-view-tabs .tab-btn').forEach((btn) => {
+    btn.onclick = () => setTraceViewTab(btn.dataset.view);
+  });
+
   document.querySelectorAll('#map-tabs .tab-btn').forEach((btn) => {
     btn.onclick = () => {
       document.querySelectorAll('#map-tabs .tab-btn').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
       mapTab = btn.dataset.tab;
-      document.getElementById('map-wrap-residual').classList.toggle('hidden', mapTab !== 'residual');
-      document.getElementById('map-wrap-raw').classList.toggle('hidden', mapTab !== 'raw');
-      document.getElementById('map-wrap-matrix').classList.toggle('hidden', mapTab !== 'matrix');
       renderAll();
     };
   });

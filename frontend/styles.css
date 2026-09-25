@@ -49,6 +49,19 @@ html, body {
   font-family: "Pretendard", -apple-system, BlinkMacSystemFont, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
 }
 
+/* 위쪽에 층이 하나 더 생길 때마다(보안 개요, 신뢰도 바 등) #layout의
+   높이를 손으로 다시 계산해야 했던(height: calc(100vh - 고정값들)) 예전
+   방식 대신, body를 세로 flex로 두고 #layout만 flex:1로 남는 공간을
+   전부 차지하게 한다 — 위쪽 블록이 몇 개든, 얼마나 커지든 자동으로 맞다. */
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+#topbar, #overview-strip, #banner, #empty-state { flex: 0 0 auto; }
+#statusbar { flex: 0 0 auto; }
+
 button {
   font-family: inherit;
   cursor: pointer;
@@ -86,8 +99,21 @@ button {
 #banner { background: #fdf6e3; border-bottom: 1px solid var(--warn); padding: 8px 16px; font-size: 12.5px; color: #5c4813; }
 #banner.hidden { display: none; }
 
+/* ---------------------------------------------------- overview strip (요청하신
+   "케이스 수/비율" 한 줄 구성) — kpi-bar는 항상 보이는 한 줄, 그 아래
+   security-overview/validity-bar 등 더 자세한 분석은 기본 접힘. */
+.overview-strip { border: 1px solid var(--border); margin: 10px 10px 0; background: var(--panel); }
+.overview-strip.hidden { display: none; }
+.overview-strip-head { display: flex; align-items: center; gap: 10px; padding: 8px 10px; }
+#overview-strip-toggle { flex: none; white-space: nowrap; }
+.overview-strip-detail {
+  overflow: hidden; max-height: 640px; border-top: 1px solid var(--border);
+  transition: max-height .25s ease, opacity .2s ease, border-color .25s ease;
+}
+.overview-strip-detail.collapsed { max-height: 0; opacity: 0; border-top-color: transparent; }
+
 /* -------------------------------------------------------------- KPI bar */
-.kpi-bar { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; padding: 10px 10px 0; }
+.kpi-bar { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; flex: 1; }
 .kpi-bar.hidden { display: none; }
 .kpi-card {
   background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
@@ -103,6 +129,42 @@ button {
 .kpi-medium .kpi-value { color: var(--sev-medium); }
 .kpi-low { border-left-color: var(--sev-low); }
 
+/* ------------------------------------------------------ security overview */
+.security-overview { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 10px 12px 0; }
+.security-overview.hidden { display: none; }
+.ov-card { background: var(--panel); border: 1px solid var(--border); padding: 8px 10px; min-height: 84px; }
+.ov-title { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .03em; margin-bottom: 6px; }
+.ov-title .hint { text-transform: none; letter-spacing: 0; opacity: .8; }
+.ov-empty { font-size: 10.5px; color: var(--text-dim); padding: 6px 0; }
+.sec-metric-ci { position: absolute; top: 0; bottom: 0; background: rgba(0,0,0,.18); }
+
+/* ---------------------------------------------------------- validity bar */
+/* ARI는 발산형 정량 속성(-1~1, 0=우연 수준)이라 Ch10.3.2 발산형 컬러맵과
+   같은 원칙을 길이 채널에 적용한다: 중앙(0)에 기준선을 두고 양쪽으로 뻗는
+   막대 두 개(raw/residual)로 그린다. hue는 raw/residual 두 값만 구분하면
+   되므로(순서 없는 범주 2개) 이름 붙이기 쉬운 색 두 개만 쓴다. */
+.validity-bar { display: flex; gap: 24px; align-items: center; padding: 8px 12px 0; flex-wrap: wrap; transition: background-color .3s ease; }
+.validity-bar.flash { background-color: #fdf3e3; }
+.validity-bar.hidden { display: none; }
+.validity-item { display: flex; flex-direction: column; gap: 3px; min-width: 260px; }
+.validity-item-compact { min-width: 160px; }
+.validity-label { font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .03em; }
+.validity-label .hint { text-transform: none; letter-spacing: 0; opacity: .8; }
+.validity-value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.validity-diverging { position: relative; height: 26px; }
+.validity-track { position: absolute; top: 12px; left: 0; right: 0; height: 2px; background: var(--accent-soft); }
+.validity-zero { position: absolute; top: 2px; left: 50%; width: 1px; height: 22px; background: var(--border-strong); }
+.validity-fill { position: absolute; height: 6px; border-radius: 1px; }
+.validity-fill.raw { background: #9aa1a8; }
+.validity-fill.residual { background: #2f6fb3; }
+.validity-badge { display: inline-block; margin-left: 8px; padding: 1px 7px; font-size: 10px; border-radius: 3px; font-weight: 600; }
+.validity-badge.sig { background: #dff2e5; color: #1e7a3d; }
+.validity-badge.nosig { background: #f1f1f1; color: var(--text-dim); }
+.validity-legend { display: flex; gap: 10px; font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+.validity-legend span::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
+.validity-legend .leg-raw::before { background: #9aa1a8; }
+.validity-legend .leg-residual::before { background: #2f6fb3; }
+
 /* ------------------------------------------------------------------ empty */
 .empty-state { display: flex; align-items: center; justify-content: center; padding: 80px 20px; }
 .empty-card { border: 1px solid var(--border); padding: 32px 40px; text-align: center; max-width: 440px; }
@@ -112,29 +174,109 @@ button {
 .empty-state.hidden { display: none; }
 
 /* ------------------------------------------------------------------ grid */
+/* 두 개의 "화면"을 전환하는 상태 기반(state-based) 레이아웃 — 같은
+   패널들을 계속 늘어놓고 크기만 조정하는 게 아니라, 화면 자체가 바뀐다.
+
+   화면 1 (개요, 기본값 — 아무 케이스도 안 골랐을 때):
+     지도가 넓게, 오른쪽에 좁은 검색 패널. "살펴보기"·"인자차이 요약"은
+     존재하지 않는 화면이다(보여줄 대상이 없으니까).
+
+   화면 2 (상세, 케이스를 하나 고르면 — JS가 #layout에 .detail-mode를 붙인다):
+     - 맨 위: 검색이 얇은 띠로 접힘 (다른 케이스로 빠르게 바꾸는 용도만 남김)
+     - 가운데: 지도와 케이스 원문이 좌우로 동등하게 — 지도를 아예 안 보이게
+       치우지 않는 이유는 "이 케이스가 지도 어디쯤에 있었는지" 맥락을
+       유지해야 다른 근처 케이스로 이어서 탐색하기 쉽기 때문.
+     - 맨 아래: 클린런/GT 인자 차이 요약 — 이 화면의 주인공인 케이스에
+       한정된 신호만 보여주고, suite 전체 통계는 오버뷰로 보내 분리한다. */
 #layout {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1.15fr 0.85fr;
+  grid-template-columns: 1fr 190px 300px;
+  grid-template-rows: 1fr;
+  grid-template-areas: "map quickstats search";
   gap: 10px;
   padding: 10px;
-  height: calc(100vh - 48px - 26px - 62px);
+  flex: 1 1 auto;
+  min-height: 0;
 }
-#panel-map { grid-row: 1; grid-column: 1; }
-#panel-trace { grid-row: 1; grid-column: 2; }
-#event-log-section { grid-row: 2; grid-column: 1; }
-#panel-analysis { grid-row: 2; grid-column: 2; }
+#panel-explore { grid-area: map; }
+#panel-quickstats { grid-area: quickstats; }
+#event-log-section { grid-area: search; }
+#panel-trace, #panel-argsummary, #panel-argcompare { display: none; }
 
-#panel-map, #panel-trace, #panel-analysis, #event-log-section {
+#layout.detail-mode {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto 1fr auto;
+  grid-template-areas:
+    "search  search"
+    "map     trace"
+    "argsum  argsum";
+}
+#layout.detail-mode #event-log-section { grid-area: search; max-height: 92px; }
+#layout.detail-mode #panel-explore { grid-area: map; }
+#layout.detail-mode #panel-trace { grid-area: trace; display: flex; }
+#layout.detail-mode #panel-argsummary { grid-area: argsum; display: flex; max-height: 220px; }
+/* 상세 화면엔 케이스 한정 요약(4번)이 이미 있으니 suite 전체 사이드
+   그래프는 자리를 만들지 않고 접는다. */
+#layout.detail-mode #panel-quickstats { display: none; }
+
+/* 검색을 얇은 띠로 접을 때: 검색창만 남기고 표/필터/카운트는 숨긴다 —
+   케이스를 이미 하나 고른 상태라 목록 전체를 다시 훑을 필요는 없고,
+   "다른 케이스로 바로 바꾸기"만 되면 된다. */
+#layout.detail-mode #event-log-section .event-log-toolbar,
+#layout.detail-mode #event-log-section .event-log-body,
+#layout.detail-mode #event-log-section .event-log-count {
+  display: none;
+}
+
+/* 지도도 좁아지므로 조작 UI(군집 설정/구성 근거)는 접어서 점 배치
+   자체만 남긴다 — 자세한 조작은 개요 화면으로 돌아가서 한다. */
+#layout.detail-mode #panel-explore .map-toolbar,
+#layout.detail-mode #panel-explore .cluster-picker,
+#layout.detail-mode #panel-explore #cluster-composition {
+  display: none;
+}
+
+/* 화면 3 (클린런 비교 — 이벤트 배지나 인자차이 요약의 항목을 클릭하면
+   이 화면 하나로 전환된다. 이전 화면으로 "보내는" 링크가 아니라 이
+   비교 자체가 화면 전체를 차지하는 독립된 화면이다). */
+#layout.argcompare-mode {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+  grid-template-areas: "argcompare";
+}
+#layout.argcompare-mode #panel-argcompare { grid-area: argcompare; display: flex; }
+#layout.argcompare-mode #panel-explore,
+#layout.argcompare-mode #panel-quickstats,
+#layout.argcompare-mode #event-log-section,
+#layout.argcompare-mode #panel-trace,
+#layout.argcompare-mode #panel-argsummary {
+  display: none;
+}
+
+#panel-explore, #panel-trace, #event-log-section, #panel-argsummary, #panel-argcompare, #panel-quickstats {
   background: var(--panel);
   border: 1px solid var(--border);
   padding: 12px 14px;
   min-height: 0;
   overflow-y: auto;
-  display: flex;
   flex-direction: column;
 }
+#panel-explore, #event-log-section, #panel-quickstats { display: flex; }
+/* #panel-trace/#panel-argsummary/#panel-argcompare의 display는 위 상태
+   기반 규칙(기본 none / 각 모드에서 flex)이 결정한다 — 여기서 같이
+   display:flex를 주면 특정도가 같아서(둘 다 ID 선택자 1개) 이 규칙이
+   나중에 와 항상 이겨버린다. */
 .event-log-section.hidden { display: none; }
+#panel-argcompare { display: none; }
+
+/* ------------------------------------------------------------ quick stats */
+.quickstats-panel { gap: 12px; padding: 10px 10px; }
+.qs-block { display: flex; flex-direction: column; gap: 4px; }
+.qs-title { font-size: 9.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .03em; }
+.qs-hint { margin-top: auto; padding-top: 8px; font-size: 9px; color: var(--text-dim); line-height: 1.4; border-top: 1px solid var(--border); }
+.qs-row.composition-row { cursor: pointer; grid-template-columns: 7px 1fr 44px 26px; gap: 4px; font-size: 9.5px; }
+.qs-row.composition-row:hover { background: var(--accent-soft); }
+.qs-row .composition-label { font-size: 9.5px; }
 
 h2 { font-size: 11.5px; margin: 0; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; display: flex; align-items: center; gap: 6px; }
 h2 .fig-label {
@@ -213,6 +355,11 @@ h2 .fig-label {
 }
 .search-results.hidden { display: none; }
 
+/* "원문"/"DTW 비교" 탭 — 활성 탭 하나만 패널의 남은 높이를 전부 쓴다. */
+#trace-view-tabs { flex: 0 0 auto; margin-bottom: 6px; }
+.trace-view-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+.trace-view-pane.hidden { display: none; }
+
 .trace-detail.hidden { display: none; }
 .trace-detail { margin: 0; border: 1px solid var(--border); padding: 8px 10px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .trace-detail-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; flex-wrap: wrap; gap: 6px; flex: 0 0 auto; }
@@ -236,6 +383,9 @@ h2 .fig-label {
 .evt-flag { font-size: 9px; padding: 0 4px; border: 1px solid var(--border-strong); }
 .evt-flag.injected { color: #fff; background: var(--danger); border-color: var(--danger); }
 .evt-flag.matched { color: var(--text-dim); }
+/* 확정 판정(존재잔차, injected)과 참고 신호(인자잔차)를 색으로도 구분한다 —
+   실선 배경(확정) vs 점선 테두리만(참고). */
+.evt-flag.arg-mismatch { color: #8a5a1f; border: 1px dashed #c98a2e; background: #fdf3e3; cursor: help; }
 
 #compare-body { flex: 1; min-height: 90px; overflow-y: auto; }
 #compare-body.hidden { display: none; }
@@ -246,16 +396,26 @@ h2 .fig-label {
 .dtw-label { font-size: 9.5px; color: var(--text-dim); }
 .dtw-value { font-size: 18px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
 
+.dtw-cost-title { font-size: 10px; color: var(--text-dim); margin-bottom: 3px; display: flex; justify-content: space-between; flex: 0 0 auto; }
+.dtw-cost-strip { display: flex; gap: 1px; height: 16px; margin-bottom: 10px; flex: 0 0 auto; }
+.dtw-cost-seg { flex: 1; min-width: 2px; cursor: pointer; }
+.dtw-cost-seg.playhead { outline: 2px solid var(--accent); outline-offset: -1px; }
+
 #align-rows { display: flex; flex-direction: column; gap: 6px; }
-.align-row { display: flex; align-items: center; gap: 6px; font-size: 10.5px; }
-.align-row-label { width: 26px; color: var(--text-dim); flex: none; }
-.align-row-track { flex: 1; display: flex; gap: 3px; overflow-x: auto; padding: 2px 0; }
+/* 화면이 절반 폭으로 좁아진 뒤(3번 패널이 지도와 반반), 라벨("트레이스A
+   (조건 무방어)")과 이벤트 칸이 한 줄에서 경쟁하면서 겹쳐 보이는 문제가
+   있었다 — 라벨을 트랙 위 별도 줄로 내려서 폭에 상관없이 절대 겹치지
+   않게 한다. */
+.align-row { display: flex; flex-direction: column; gap: 3px; font-size: 10.5px; margin-bottom: 4px; }
+.align-row-label { color: var(--text-dim); white-space: nowrap; font-weight: 600; }
+.align-row-track { display: flex; gap: 3px; overflow-x: auto; padding: 2px 0; }
 .align-cell {
   flex: none; min-width: 22px; padding: 2px 5px; border: 1px solid var(--border-strong); text-align: center;
   font-size: 10px; white-space: nowrap;
 }
 .align-cell.playhead { outline: 2px solid var(--accent); }
 .align-cell.mismatch { background: #fdecea; border-color: var(--danger); }
+.align-cell.arg-mismatch { background: #fdf3e3; border-color: #c98a2e; border-style: dashed; }
 
 .diagnosis { margin-top: 8px; font-size: 11.5px; border: 1px solid var(--border); padding: 8px 10px; line-height: 1.5; flex: 0 0 auto; }
 .diagnosis b { color: var(--danger); }
@@ -270,7 +430,64 @@ h2 .fig-label {
 .neighbor-bar-fill { position: absolute; top: 0; left: 0; bottom: 0; background: var(--accent); }
 .neighbor-dist { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-dim); }
 
-.security-details { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; flex: 0 0 auto; }
+/* 군집 구성 근거 패널 — neighbor-row와 같은 grid 비율(길이=count, 색=범주)을
+   재사용해서 새 idiom을 만들지 않고 이미 검증된 것과 동일한 어휘로 읽히게 한다. */
+.composition-block { margin-top: 6px; }
+.composition-subtitle { font-size: 10px; color: var(--text-dim); margin: 4px 0 2px; }
+.composition-row { display: grid; grid-template-columns: 8px 1fr 70px 26px; gap: 6px; align-items: center; padding: 2px 2px; font-size: 10.5px; }
+.composition-swatch { width: 8px; height: 8px; border-radius: 2px; }
+.composition-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composition-bar-track { height: 6px; background: var(--accent-soft); position: relative; }
+.composition-bar-fill { position: absolute; top: 0; left: 0; bottom: 0; }
+.composition-count { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-dim); }
+.composition-note { margin-top: 6px; font-size: 10px; color: var(--text-dim); line-height: 1.4; }
+
+/* -------------------------------------------------------- arg summary panel */
+.argsummary-panel .panel-head { margin-bottom: 6px; }
+#argsummary-body { display: flex; flex-direction: column; gap: 10px; font-size: 11px; }
+.argsummary-case { border: 1px solid var(--border); padding: 6px 8px; }
+.argsummary-case-title { font-size: 10.5px; font-weight: 700; margin-bottom: 4px; }
+.argsummary-empty { font-size: 10.5px; color: var(--text-dim); }
+.argsummary-row { display: grid; grid-template-columns: 28px auto 1fr; gap: 8px; align-items: center; padding: 3px 0; font-size: 10.5px; border-top: 1px dashed var(--border); }
+.argsummary-row:first-of-type { border-top: none; }
+.argsummary-idx { color: var(--text-dim); }
+.argsummary-fn { font-variant-numeric: tabular-nums; color: #8a5a1f; }
+.argsummary-note { color: var(--text-dim); font-size: 10px; }
+.argsummary-foot { font-size: 10.5px; color: var(--text-dim); border-top: 1px solid var(--border); padding-top: 6px; }
+.argsummary-row.clickable { cursor: pointer; }
+.argsummary-row.clickable:hover { background: var(--accent-soft); }
+.evt-flag.arg-mismatch { cursor: pointer; }
+
+/* ---------------------------------------------------------- arg compare 화면 */
+.argcompare-panel .panel-head { gap: 12px; }
+.argcompare-diffcard {
+  display: flex; flex-wrap: wrap; gap: 14px; margin: 4px 0 16px;
+  padding: 14px 16px; background: #fdf3e3; border: 1px solid #c98a2e;
+}
+.argcompare-diffcard.empty { background: var(--panel); border-color: var(--border); color: var(--text-dim); font-size: 12px; }
+.diffcard-item { display: flex; flex-direction: column; gap: 6px; }
+.diffcard-key { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .03em; }
+.diffcard-compare { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.diffcard-expected { color: #1e7a3d; }
+.diffcard-arrow { color: var(--text-dim); font-weight: 400; }
+.diffcard-actual { color: var(--danger); }
+.diffcard-share { font-size: 9.5px; color: var(--text-dim); font-weight: 400; margin-top: 2px; }
+
+.argcompare-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; flex: 1; min-height: 0; }
+.argcompare-col { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; border: 1px solid var(--border); padding: 10px; }
+.argcompare-col-title { font-size: 11px; font-weight: 700; margin-bottom: 8px; flex: 0 0 auto; }
+.argcompare-col-title .hint { font-weight: 400; color: var(--text-dim); font-size: 10px; }
+.argcompare-step { border: 1px solid var(--border); padding: 6px 8px; margin-bottom: 6px; font-size: 11px; }
+.argcompare-step.diverge { border-color: var(--danger); background: #fdecea; }
+.argcompare-step.estimated { border-style: dashed; border-color: #c98a2e; background: #fdf3e3; }
+.argcompare-step.real { border-color: #15803d; }
+.argcompare-step-fn { font-weight: 700; }
+.argcompare-step-args { color: var(--text-dim); font-variant-numeric: tabular-nums; margin-top: 2px; }
+.argcompare-step-note { font-size: 9.5px; color: var(--text-dim); margin-top: 3px; font-style: italic; }
+
+.security-details-wrap { padding: 6px 12px 0; }
+.security-details-wrap.hidden { display: none; }
+.security-details { border-top: 1px solid var(--border); padding-top: 8px; flex: 0 0 auto; }
 .security-details summary { cursor: pointer; font-size: 11px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: .03em; list-style: none; }
 .security-details summary::-webkit-details-marker { display: none; }
 .security-details summary::before { content: '+ '; }
@@ -324,3 +541,34 @@ h2 .fig-label {
   border: 1px solid var(--border-strong); padding: 6px 9px; font-size: 11px; z-index: 999;
   max-width: 260px; line-height: 1.4;
 }
+
+/* ---- 보안 분석 탭 ---- */
+.sec-wrap { overflow-y: auto; border: 1px solid var(--border); background: #fff; }
+.sec-mode #condition-filter, .sec-mode .cluster-picker, .sec-mode #cluster-composition,
+.sec-mode #map-fit-view, .sec-mode #map-svg-export, .sec-mode #map-settings-toggle { display: none; }
+.sec-view { padding: 10px 14px 18px; }
+.sec-view svg { height: auto; border: none; background: transparent; }
+.sec-section { padding: 6px 0 16px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+.sec-section:last-child { border-bottom: none; }
+.sec-title { font-size: 12px; font-weight: 700; margin-bottom: 8px; }
+.sec-title .hint, .sec-legend .hint { font-weight: 400; color: var(--text-dim); font-size: 10.5px; }
+.sec-title-sub { font-size: 10.5px; color: var(--text-dim); margin-right: 8px; }
+.sec-svg-label { font-size: 10.5px; fill: var(--text); }
+.sec-svg-head { font-size: 11px; font-weight: 700; fill: var(--text); }
+.sec-note { font-size: 10px; color: var(--text-dim); line-height: 1.5; margin-top: 6px; }
+.sec-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 10.5px; color: var(--text-dim); margin-top: 4px; }
+.sec-legend i { display: inline-block; width: 9px; height: 9px; margin-right: 4px; vertical-align: -1px; }
+.sec-quadbar { display: flex; height: 30px; gap: 2px; }
+.sec-quadseg { display: flex; align-items: center; justify-content: center; color: #fff; font-size: 12px; font-weight: 700; cursor: pointer; min-width: 22px; }
+.sec-quadcards { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 6px; margin-top: 8px; }
+.sec-quadcard { border: 1px solid var(--border); border-top: 3px solid var(--border-strong); padding: 5px 8px; font-size: 10.5px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.sec-quadcard:hover, .sec-list-row:hover, .sec-tl-row:hover { background: var(--accent-soft); }
+.sec-quadcard span { color: var(--text-dim); }
+.sec-list { margin-top: 8px; }
+.sec-list-head { font-size: 10.5px; font-weight: 700; margin-bottom: 3px; }
+.sec-list-row { display: grid; grid-template-columns: 1.3fr 1.6fr 1.6fr auto; gap: 8px; padding: 3px 4px; font-size: 10.5px; border-top: 1px dashed var(--border); cursor: pointer; }
+.sec-list-id { font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sec-tl-head { display: flex; align-items: center; gap: 6px; margin: 12px 0 4px; }
+.sec-tl-row { display: flex; align-items: center; gap: 8px; padding: 1px 4px; cursor: pointer; font-size: 10.5px; }
+.sec-tl-id { flex: 0 0 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sec-tl-meta { color: var(--text-dim); white-space: nowrap; }
