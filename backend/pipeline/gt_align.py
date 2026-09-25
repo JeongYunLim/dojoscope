@@ -59,6 +59,76 @@ def align_to_ground_truth(event_vectors: np.ndarray, gt_vectors: np.ndarray, tau
     )
 
 
+def build_argument_majority_reference(traces: list) -> dict[tuple[str, str], tuple[str, float]]:
+    """(function, arg_key) -> (최빈값, 그 값이 차지하는 비중).
+
+    존재(함수 이름) 매칭만으로는 "이미 정답 시퀀스에 있는 도구를 재사용하되
+    인자만 악성으로 바꾸는" 공격을 놓친다 — GT 벡터화가 함수 이름만 담고
+    인자는 비교 대상에 없기 때문이다(align_to_ground_truth 참고). 실제
+    케이스별 정답 인자(AgentDojo의 ground_truth(environment) 호출, 즉
+    "클린런")가 있다면 그걸 기준으로 삼아야 하지만, 지금 이 파이프라인엔
+    그 데이터 소스가 없다. 대신 suite 전체에서 그 함수가 실제로 어떤 인자로
+    가장 많이 불렸는지(다수결)를 근사로 쓴다.
+
+    이 근사의 한계는 이미 실측으로 확인했다(pipeline_study/
+    argument_residual_diagnostic.py) — suite 전체에 정상 인자값이 사실상
+    고정값 몇 개뿐인 데이터에서는 다수결이 잘 통하지만, 케이스마다 정상
+    인자가 원래 다른 실제 데이터에서는 다수결 자체가 무의미해진다. 그래서
+    이 함수가 만드는 신호는 "확정 판정"이 아니라 "참고 신호"로만 쓰고,
+    min_share로 다수결 근거가 약할 때(과반 미만)는 판정을 보류한다.
+    """
+    counters: dict[tuple[str, str], dict[str, int]] = {}
+    for t in traces:
+        for ev in t.events:
+            if ev.role != "tool_call" or not ev.function:
+                continue
+            for k, v in (ev.args or {}).items():
+                bucket = counters.setdefault((ev.function, k), {})
+                bucket[str(v)] = bucket.get(str(v), 0) + 1
+
+    ref: dict[tuple[str, str], tuple[str, float]] = {}
+    for key, counts in counters.items():
+        total = sum(counts.values())
+        value, count = max(counts.items(), key=lambda kv: kv[1])
+        ref[key] = (value, count / total)
+    return ref
+
+
+def compute_arg_mismatch(trace, matched_to_gt: list[bool], majority_ref: dict, min_share: float = 0.5) -> list[bool]:
+    """이벤트별로 "함수는 GT와 매칭됐지만 인자가 다수결 값과 다른"(=인자
+    재사용형 공격일 가능성) 이벤트를 표시한다. existence residual이
+    이미 잡아낸 이벤트(matched_to_gt=False)는 건드리지 않는다 — 거기 더
+    보탤 정보가 없다."""
+    flags: list[bool] = []
+    for i, ev in enumerate(trace.events):
+        mismatch = False
+        if i < len(matched_to_gt) and matched_to_gt[i] and ev.role == "tool_call" and ev.function:
+            for k, v in (ev.args or {}).items():
+                ref = majority_ref.get((ev.function, k))
+                if ref is not None and ref[1] >= min_share and str(v) != ref[0]:
+                    mismatch = True
+        flags.append(mismatch)
+    return flags
+
+
+def compute_arg_mismatch_details(trace, matched_to_gt: list[bool], majority_ref: dict, min_share: float = 0.5) -> list[dict]:
+    """compute_arg_mismatch와 같은 판정을 쓰되, "다르다"만이 아니라 "무엇이
+    기대값이고 무엇이 실제값인지"까지 이벤트별로 담는다 — "injection이
+    없었다면 이 자리에 어떤 인자가 있었을지"를 화면에 직접 보여주기 위해
+    필요하다. 반환값: 이벤트별 {인자키: {actual, expected, expected_share}}
+    (불일치가 없으면 빈 dict)."""
+    details: list[dict] = []
+    for i, ev in enumerate(trace.events):
+        d: dict = {}
+        if i < len(matched_to_gt) and matched_to_gt[i] and ev.role == "tool_call" and ev.function:
+            for k, v in (ev.args or {}).items():
+                ref = majority_ref.get((ev.function, k))
+                if ref is not None and ref[1] >= min_share and str(v) != ref[0]:
+                    d[k] = {"actual": v, "expected": ref[0], "expected_share": round(ref[1], 3)}
+        details.append(d)
+    return details
+
+
 def _cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
     denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12
     return float(max(0.0, 1.0 - float(a @ b) / denom))
